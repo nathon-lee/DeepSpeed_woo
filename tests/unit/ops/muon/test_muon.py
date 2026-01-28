@@ -99,7 +99,7 @@ class TestMuonReduceScatterIncompatibility(DistributedTest):
         }
 
         model = SimpleModel(hidden_dim=32, nlayers=5)
-        
+
         # Expect an AssertionError when initializing with Muon + reduce_scatter
         with pytest.raises(AssertionError, match="incompatible with Muon optimizer"):
             engine, optimizer, _, _ = deepspeed.initialize(
