@@ -42,6 +42,7 @@ class TestMuonConfigs(DistributedTest):
             },
             "zero_optimization": {
                 "stage": zero_stage,
+                "reduce_scatter": False if optimizer_type == "muon" else True,
             }
         }
         # Perform a few training steps to ensure the optimizer works correctly
@@ -72,3 +73,38 @@ class TestMuonConfigs(DistributedTest):
         after_training = [p.clone().cpu() for p in model.parameters()]
         for initial, final in zip(initial_params, after_training):
             assert not torch.equal(initial.cpu(), final.cpu()), "Parameters should have been updated during training"
+
+
+@pytest.mark.parametrize('zero_stage', [1, 2])
+class TestMuonReduceScatterIncompatibility(DistributedTest):
+    """Test that Muon optimizer is incompatible with reduce_scatter=True"""
+
+    def test(self, zero_stage):
+        optimizer_params = {"lr": 0.01}
+        batch_size = 8
+        config_dict = {
+            "train_batch_size": batch_size,
+            "optimizer": {
+                "type": "muon",
+                "params": optimizer_params
+            },
+            "gradient_clipping": 1.0,
+            "fp16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+                "reduce_scatter": True,  # This should cause an assertion error with Muon
+            }
+        }
+
+        model = SimpleModel(hidden_dim=32, nlayers=5)
+        
+        # Expect an AssertionError when initializing with Muon + reduce_scatter
+        with pytest.raises(AssertionError, match="incompatible with Muon optimizer"):
+            engine, optimizer, _, _ = deepspeed.initialize(
+                config=config_dict,
+                model=model,
+                model_parameters=model.parameters(),
+                dist_init_required=False,
+            )
