@@ -256,3 +256,72 @@ Conduct](https://opensource.microsoft.com/codeofconduct/). For more information 
     * [DeepSpeed: All the tricks to scale to gigantic models (Mark Saroufim)](https://www.youtube.com/watch?v=pDGI668pNg0)
     * [Turing-NLG, DeepSpeed and the ZeRO optimizer (Yannic Kilcher)](https://www.youtube.com/watch?v=tC01FRB0M7w)
     * [Ultimate Guide To Scaling ML Models (The AI Epiphany)](https://www.youtube.com/watch?v=hc0u4avAkuM)
+  
+
+# DeepSpeed 学习资料指南
+
+这份指南旨在帮助您快速熟悉 DeepSpeed 代码库，理解其核心架构，并找到相关的学习资源。
+
+## 1. 项目概览
+
+**DeepSpeed** 是一个用于深度学习优化的库，旨在实现极高的训练速度和规模。它由 Microsoft 开发，支持 PyTorch。
+
+*   **核心目标**: 提升大规模模型训练的效率和易用性。
+*   **关键技术**: ZeRO (Zero Redundancy Optimizer), 3D Parallelism, Mixture of Experts (MoE), ZeRO-Infinity 等。
+*   **Github 仓库**: [https://github.com/deepspeedai/DeepSpeed](https://github.com/deepspeedai/DeepSpeed)
+
+## 2. 核心代码结构 (`deepspeed/`)
+
+DeepSpeed 的核心逻辑位于 `deepspeed/` 目录下：
+
+*   **`runtime/`**: 运行时核心逻辑。
+    *   `engine.py`: 定义了 `DeepSpeedEngine`，这是 DeepSpeed 的核心引擎，负责封装模型、优化器和数据加载器。
+    *   `zero/`: ZeRO 优化器的实现（Stage 1, 2, 3），是 DeepSpeed 省显存的关键。
+    *   `pipe/`: 流水线并行 (Pipeline Parallelism) 的实现。
+    *   `hybrid_engine.py`: 混合引擎支持。
+*   **`ops/`**: 自定义的 C++/CUDA 算子，用于加速特定操作（如 Transformer 层、Adam 优化器等）。
+*   **`moe/`**: 混合专家模型 (Mixture of Experts) 的支持代码。
+*   **`inference/`**: 推理相关的优化和引擎。
+*   **`accelerator/`**: 硬件加速器抽象层，支持不同硬件后端。
+*   **`comm/`**: 通信原语封装。
+
+## 3. 核心 API 入口
+
+了解以下 API 是使用 DeepSpeed 的第一步：
+
+*   **`deepspeed.initialize`**: 初始化 DeepSpeed 引擎的主要入口函数。它接受模型、优化器、参数等，并返回封装后的引擎、优化器等对象。
+    *   源码位置: `deepspeed/__init__.py`
+*   **`DeepSpeedConfig`**: 用于解析和管理 DeepSpeed 的配置（通常是 `ds_config.json`）。
+
+## 4. 官方教程与文档 (`docs/`)
+
+本项目包含丰富的文档，位于 `docs/` 目录下，特别是 `docs/_tutorials/`：
+
+*   **入门指南**:
+    *   `docs/_tutorials/getting-started.md`: 快速上手指南。
+    *   `docs/_tutorials/accelerator-setup-guide.md`: 加速器环境配置指南。
+*   **核心特性教程**:
+    *   `docs/_tutorials/zero.md`: ZeRO 优化器详解。
+    *   `docs/_tutorials/zero-offload.md`: ZeRO-Offload 教程（将优化器状态卸载到 CPU）。
+    *   `docs/_tutorials/pipeline.md`: 流水线并行教程。
+    *   `docs/_tutorials/mixture-of-experts.md`: MoE 教程。
+    *   `docs/_tutorials/inference-tutorial.md`: 推理优化教程。
+*   **高级特性**:
+    *   `docs/_tutorials/autotuning.md`: 自动调优指南。
+    *   `docs/_tutorials/monitor.md`: 监控工具使用。
+
+## 5. 示例代码 (`examples/`)
+
+DeepSpeed 的示例代码主要托管在外部仓库，但在 `examples/README.md` 中提供了链接：
+
+*   **DeepSpeedExamples**: [https://github.com/deepspeedai/DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples) - 包含各种模型（如 BERT, GPT, Megatron-LM 等）的训练示例。
+*   **Megatron-DeepSpeed**: [https://github.com/deepspeedai/Megatron-DeepSpeed](https://github.com/deepspeedai/Megatron-DeepSpeed) - 结合了 Megatron-LM 和 DeepSpeed 的强大功能。
+*   **Hugging Face 集成**: [https://huggingface.co/docs/transformers/deepspeed](https://huggingface.co/docs/transformers/deepspeed) - 如何在 Transformers 库中使用 DeepSpeed。
+
+## 6. 建议学习路径
+
+1.  **阅读 `README.md`**: 了解 DeepSpeed 的最新动态和支持的模型列表。
+2.  **查看 `docs/_tutorials/getting-started.md`**: 跑通第一个 Hello World 级别的 DeepSpeed 程序。
+3.  **浏览 `deepspeed/runtime/engine.py`**: 理解 `DeepSpeedEngine` 的生命周期和 `initialize` 过程。
+4.  **深入 ZeRO**: 阅读 `docs/_tutorials/zero.md` 并结合 `deepspeed/runtime/zero/` 下的代码（如 `stage_1_and_2.py`, `stage3.py`）进行学习。
+5.  **实践**: 克隆 `DeepSpeedExamples` 仓库，运行其中的 CIFAR-10 或 BERT 示例，并尝试修改配置 (`ds_config.json`) 来观察性能变化。
