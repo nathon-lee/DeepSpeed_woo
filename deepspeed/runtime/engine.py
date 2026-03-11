@@ -584,7 +584,7 @@ class DeepSpeedEngine(Module):
 
         partition_config = None
         if hasattr(tp_config, "get_partition_config_object"):
-            partition_config = tp_config.get_partition_config_object()
+            partition_config = tp_config.get_partition_config_object(model=model)
 
         if partition_config is not None:
             autotp = AutoTP(module=model,
@@ -4497,3 +4497,4 @@ class DeepSpeedEngine(Module):
             DeepSpeedZeRoOffload), "Moving states across devices is not supported without an optimizer."
 
         self.optimizer.reload_states(non_blocking=non_blocking)
+

@@ -112,18 +112,29 @@ class TPTrainingConfig(DeepSpeedConfigModel):
 
     ########################################
 
-    def get_partition_config_object(self):
+    def get_partition_config_object(self, model=None):
         """
         Get the AutoTPConfig object from the configuration.
         Returns None if no custom config is specified.
         """
         from deepspeed.module_inject.autotp_config import AutoTPConfig, AutoTPPresets, merge_autotp_configs
+        from deepspeed.module_inject.hf_tp_plan import hf_model_tp_plan_to_config
 
         config = None
 
         # First check for preset
         if self.preset_model:
             config = AutoTPPresets.get_preset(self.preset_model)
+
+        # Then try to build from HuggingFace tp_plan metadata if a model is provided.
+        hf_config = None
+        if model is not None:
+            hf_config = hf_model_tp_plan_to_config(model, tp_size=self.autotp_size)
+            if hf_config is not None:
+                if config:
+                    config = merge_autotp_configs(config, hf_config)
+                else:
+                    config = hf_config
 
         # Then check for custom config
         if self.partition_config:
@@ -144,3 +155,4 @@ def get_tensor_parallel_config(ds_config):
     if 'tensor_parallel' in ds_config:
         return TPTrainingConfig(**ds_config['tensor_parallel'])
     return TPTrainingConfig()
+
