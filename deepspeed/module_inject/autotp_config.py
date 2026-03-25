@@ -508,6 +508,46 @@ class AutoTPPresets:
         ], )
 
     @staticmethod
+    def qwen_moe_gqa() -> AutoTPConfig:
+        """Qwen-style MoE model family with GQA attention.
+
+        This structure-level preset is intended to be shared by concrete model
+        aliases such as ``qwen3_moe``. First-stage support focuses on the dense
+        attention path plus MoE expert FFN projections, while explicitly
+        skipping the router/gate weights.
+        """
+        return AutoTPConfig(layer_specs=[
+            TPLayerSpec(
+                patterns=[r".*\.self_attn\.o_proj\.weight$"],
+                partition_type=PartitionType.ROW,
+            ),
+            TPLayerSpec(
+                patterns=[r".*\.self_attn\.[qkv]_proj\.weight$"],
+                partition_type=PartitionType.COLUMN,
+            ),
+            TPLayerSpec(
+                patterns=[r".*\.mlp\.experts\.\d+\.down_proj\.weight$"],
+                partition_type=PartitionType.ROW,
+            ),
+            TPLayerSpec(
+                patterns=[r".*\.mlp\.experts\.\d+\.(up|gate)_proj\.weight$"],
+                partition_type=PartitionType.COLUMN,
+            ),
+            TPLayerSpec(
+                patterns=[r".*\.mlp\.shared_expert\.down_proj\.weight$"],
+                partition_type=PartitionType.ROW,
+            ),
+            TPLayerSpec(
+                patterns=[r".*\.mlp\.shared_expert\.(up|gate)_proj\.weight$"],
+                partition_type=PartitionType.COLUMN,
+            ),
+            TPLayerSpec(
+                patterns=[r".*\.mlp\.gate\.weight$"],
+                partition_type=PartitionType.SKIP,
+            ),
+        ], )
+
+    @staticmethod
     def phi3() -> AutoTPConfig:
         """Phi3 model with fused QKV and chunked MLP."""
         return AutoTPConfig(
@@ -546,6 +586,7 @@ class AutoTPPresets:
             "mixtral": AutoTPPresets.mixtral,
             "deepseek_v2": AutoTPPresets.deepseek_v2,
             "qwen2": AutoTPPresets.qwen2,
+            "qwen3_moe": AutoTPPresets.qwen_moe_gqa,
             "phi3": AutoTPPresets.phi3,
         }
         preset_fn = presets.get(model_type.lower())

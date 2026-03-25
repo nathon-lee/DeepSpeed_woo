@@ -14,7 +14,7 @@ from unit.common import DistributedTest, preferred_dtype
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import groups
 from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, SubParamLinearLayer, fused_LinearLayer)
-from deepspeed.module_inject.autotp_config import AutoTPConfig
+from deepspeed.module_inject.autotp_config import AutoTPConfig, AutoTPPresets, PartitionType
 from deepspeed.module_inject.auto_tp import AutoTP
 
 
@@ -76,6 +76,45 @@ class QKVLinearModel(torch.nn.Module):
 
     def forward(self, x):
         return self.self_attn(x)
+
+
+class QwenMoeAttention(torch.nn.Module):
+
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.q_proj = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.k_proj = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.v_proj = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.o_proj = torch.nn.Linear(hidden_dim, hidden_dim)
+
+
+class QwenMoeExpert(torch.nn.Module):
+
+    def __init__(self, hidden_dim, intermediate_dim):
+        super().__init__()
+        self.gate_proj = torch.nn.Linear(hidden_dim, intermediate_dim)
+        self.up_proj = torch.nn.Linear(hidden_dim, intermediate_dim)
+        self.down_proj = torch.nn.Linear(intermediate_dim, hidden_dim)
+
+
+class QwenMoeMLP(torch.nn.Module):
+
+    def __init__(self, hidden_dim, intermediate_dim, num_experts=2):
+        super().__init__()
+        self.experts = torch.nn.ModuleList([QwenMoeExpert(hidden_dim, intermediate_dim) for _ in range(num_experts)])
+        self.shared_expert = QwenMoeExpert(hidden_dim, intermediate_dim)
+        self.gate = torch.nn.Linear(hidden_dim, num_experts, bias=False)
+
+
+class QwenMoeBlock(torch.nn.Module):
+
+    def __init__(self, hidden_dim=16, intermediate_dim=32, num_experts=2):
+        super().__init__()
+        self.self_attn = QwenMoeAttention(hidden_dim)
+        self.mlp = QwenMoeMLP(hidden_dim, intermediate_dim, num_experts=num_experts)
+
+    def forward(self, x):
+        return x
 
 
 def init_tp_engine(tp_size, partition_config=None):
@@ -409,6 +448,37 @@ def test_invalid_custom_shape_rejected():
         AutoTPConfig.from_dict(bad_config)
 
 
+def test_qwen3_moe_alias_returns_family_preset():
+    alias_config = AutoTPPresets.get_preset("qwen3_moe")
+    family_config = AutoTPPresets.qwen_moe_gqa()
+
+    assert alias_config is not None
+    assert len(alias_config.layer_specs) == len(family_config.layer_specs)
+
+    for alias_spec, family_spec in zip(alias_config.layer_specs, family_config.layer_specs):
+        assert alias_spec.patterns == family_spec.patterns
+        assert alias_spec.partition_type == family_spec.partition_type
+        assert alias_spec.shape == family_spec.shape
+        assert alias_spec.partition_dim == family_spec.partition_dim
+
+
+def test_qwen3_moe_alias_matches_expected_patterns():
+    config = AutoTPPresets.get_preset("qwen3_moe")
+
+    q_proj_spec = config.find_matching_spec("decoder.layers.0.self_attn.q_proj.weight")
+    o_proj_spec = config.find_matching_spec("decoder.layers.0.self_attn.o_proj.weight")
+    gate_spec = config.find_matching_spec("decoder.layers.0.mlp.gate.weight")
+
+    assert q_proj_spec is not None
+    assert q_proj_spec.partition_type == PartitionType.COLUMN
+
+    assert o_proj_spec is not None
+    assert o_proj_spec.partition_type == PartitionType.ROW
+
+    assert gate_spec is not None
+    assert gate_spec.partition_type == PartitionType.SKIP
+
+
 class TestAutoTPFusedWeights(DistributedTest):
     world_size = 2
     reuse_dist_env = False
@@ -492,3 +562,40 @@ class TestAutoTPFusedWeights(DistributedTest):
         gathered_output = gather_subparam_output(tp_output, (q_size, k_size, v_size),
                                                  groups.get_tensor_model_parallel_group())
         assert_close_for_preferred_dtype(gathered_output, full_output)
+
+
+class TestAutoTPQwenMoeFamilyPreset(DistributedTest):
+    world_size = 2
+    reuse_dist_env = False
+
+    def test_qwen_moe_gqa_preset_replacement(self):
+        skip_on_device()
+        groups._init_tp_mesh_device(tensor_model_parallel_size=2)
+
+        model = QwenMoeBlock(hidden_dim=16, intermediate_dim=32, num_experts=2)
+        autotp = AutoTP(module=model,
+                        all_reduce_linears=[],
+                        prefix="",
+                        state_dict=None,
+                        linear_layer_setting=None,
+                        orig_layer_impl=None,
+                        keep_module_on_host=False,
+                        partition_config=AutoTPPresets.qwen_moe_gqa())
+        autotp.set_tensor_parallel_config(2, groups.get_tensor_model_parallel_group())
+        autotp.update_linear_policies()
+        autotp._replace_module(model)
+
+        assert isinstance(model.self_attn.q_proj, LinearLayer)
+        assert isinstance(model.self_attn.k_proj, LinearLayer)
+        assert isinstance(model.self_attn.v_proj, LinearLayer)
+        assert isinstance(model.self_attn.o_proj, LinearAllreduce)
+
+        assert isinstance(model.mlp.experts[0].gate_proj, LinearLayer)
+        assert isinstance(model.mlp.experts[0].up_proj, LinearLayer)
+        assert isinstance(model.mlp.experts[0].down_proj, LinearAllreduce)
+
+        assert isinstance(model.mlp.shared_expert.gate_proj, LinearLayer)
+        assert isinstance(model.mlp.shared_expert.up_proj, LinearLayer)
+        assert isinstance(model.mlp.shared_expert.down_proj, LinearAllreduce)
+
+        assert isinstance(model.mlp.gate, nn.Linear)

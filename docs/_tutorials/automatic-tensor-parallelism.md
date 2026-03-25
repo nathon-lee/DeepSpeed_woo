@@ -6,13 +6,17 @@ tags: inference
 > **Note:** This tutorial covers AutoTP for **inference**. For **training** with tensor parallelism and ZeRO optimization, see [Automatic Tensor Parallelism (Training)](/tutorials/autotp-training/).
 
 # Contents
-   * [Introduction](#introduction)
-   * [Example Script](#example-script)
-        * [Launching](#launching)
-        * [T5 11B Inference Performance Comparison](#t5-11b-inference-performance-comparison)
-        * [OPT 13B Inference Performance Comparison](#opt-13b-inference-performance-comparison)
-   * [Supported Models](#supported-models)
-   * [Unsupported Models](#unsupported-models)
+- [Contents](#contents)
+- [Introduction](#introduction)
+- [Example Script](#example-script)
+  - [Launching](#launching)
+  - [T5 11B Inference Performance Comparison](#t5-11b-inference-performance-comparison)
+    - [Latency](#latency)
+    - [Throughput](#throughput)
+    - [Memory](#memory)
+  - [OPT 13B Inference Performance Comparison](#opt-13b-inference-performance-comparison)
+- [Supported Models](#supported-models)
+- [Unsupported Models](#unsupported-models)
 
 # Introduction
 This tutorial demonstrates the new automatic tensor parallelism feature for inference. Previously, the user needed to provide an injection policy to DeepSpeed to enable tensor parallelism. DeepSpeed now supports automatic tensor parallelism for HuggingFace models by default as long as kernel injection is not enabled and an injection policy is not provided. This allows our users to improve performance of models that are not currently supported via kernel injection, without providing the injection policy. Below is an example of the new method:
@@ -164,6 +168,7 @@ The following model families have been successfully tested with automatic tensor
 - qwen2-moe
 - qwen2.5
 - qwen3
+- qwen3_moe
 - reformer
 - roberta
 - roformer
