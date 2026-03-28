@@ -583,16 +583,31 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # the standard ZeRO-3 fp16-partition / fp32-partition machinery.
         self.autoep_expert_params = []
 
+        # We need to maintain group structure for expert params to preserve
+        # weight_decay, learning_rates, etc., and create FP32 master weights.
+        expert_optimizer_groups = []
+
         for param_group in self.optimizer.param_groups:
             trainable_params = []
+            expert_params_in_group = []
             for p in param_group[PARAMS_KEY]:
                 if not p.requires_grad:
                     continue
                 if getattr(p, '_autoep_expert', False):
                     # Segregate expert params from ZeRO-3 partitioning pipeline.
                     self.autoep_expert_params.append(p)
+                    expert_params_in_group.append(p)
                 else:
                     trainable_params.append(p)
+
+            if expert_params_in_group:
+                expert_group = {k: v for k, v in param_group.items() if k != PARAMS_KEY}
+                # Create FP32 Master Weight clones for true full-precision optimizer logic
+                fp32_master_params = [p.clone().float().detach() for p in expert_params_in_group]
+                for p_fp32 in fp32_master_params:
+                    p_fp32.requires_grad = True
+                expert_group[PARAMS_KEY] = fp32_master_params
+                expert_optimizer_groups.append(expert_group)
 
             if len(trainable_params) == 0:
                 continue
@@ -604,6 +619,17 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 else:
                     trainable_param_group[key] = param_group[key]
             param_groups.append(trainable_param_group)
+
+        # Initialize the true full-precision optimizer for expert params immediately so that
+        # it is available for checkpoint loading/saving before any steps.
+        if expert_optimizer_groups and hasattr(self, 'optimizer') and self.optimizer is not None:
+            optimizer_cls = type(self.optimizer)
+            self._autoep_expert_fp16_to_fp32 = list(
+                zip(self.autoep_expert_params, [p for g in expert_optimizer_groups for p in g[PARAMS_KEY]]))
+            self._autoep_expert_optimizer = optimizer_cls(expert_optimizer_groups)
+        else:
+            self._autoep_expert_optimizer = None
+            self._autoep_expert_fp16_to_fp32 = []
 
         return param_groups
 
@@ -2603,6 +2629,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         already EP-allreduced by _reduce_expert_grad during backward.  We update them
         via a dedicated optimizer instance so they never touch fp32_partitioned_groups.
         """
+        if getattr(self, '_autoep_expert_optimizer', None) is None:
+            return
+
         expert_params = getattr(self, 'autoep_expert_params', [])
         if not expert_params:
             return
@@ -2616,21 +2645,21 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             for p in params_with_grad:
                 p.grad.div_(self.loss_scale)
 
-        # Build a dedicated optimizer for expert params on the first step.
-        # We reuse the same class and hyper-parameters as the main optimizer so
-        # that learning rate schedules apply transparently.
-        if not hasattr(self, '_autoep_expert_optimizer'):
-            optimizer_cls = type(self.optimizer)
-            base_group = self.optimizer.param_groups[0]
-            expert_group = {k: v for k, v in base_group.items() if k != 'params'}
-            expert_group['params'] = expert_params
-            self._autoep_expert_optimizer = optimizer_cls([expert_group])
+        # Transfer grad from FP16 to FP32 master weights
+        for p_fp16, p_fp32 in getattr(self, '_autoep_expert_fp16_to_fp32', []):
+            if p_fp16.grad is not None:
+                if p_fp16.grad.dtype == p_fp32.dtype:
+                    p_fp32.grad = p_fp16.grad.clone()
+                else:
+                    p_fp32.grad = p_fp16.grad.to(p_fp32.dtype)
 
         self._autoep_expert_optimizer.step()
 
-        # Clear gradients so they do not accumulate across steps.
-        for p in params_with_grad:
-            p.grad = None
+        # Update FP16 weights from FP32 master weights and clear grads
+        for p_fp16, p_fp32 in getattr(self, '_autoep_expert_fp16_to_fp32', []):
+            p_fp16.data.copy_(p_fp32.data)
+            p_fp16.grad = None
+            p_fp32.grad = None
 
     def dump_pre_step_gradients(self, debug_fp32_grads):
         # Dump gradient norms for debugging
@@ -3122,6 +3151,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # Expert params are stored full on each EP rank (ds_persist=True, ds_tensor=None),
         # so we do not need to gather across DP ranks — each EP rank writes its own slice.
         state_dict[AUTOEP_LAYERS_KEY] = self._collect_autoep_expert_state()
+        if getattr(self, '_autoep_expert_optimizer', None) is None:
+            state_dict['ds_autoep_expert_optimizer'] = None
+        else:
+            state_dict['ds_autoep_expert_optimizer'] = self._autoep_expert_optimizer.state_dict()
 
         return state_dict
 
@@ -3329,6 +3362,16 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # ds_tensor=None so they are not covered by the fp32_partitioned_groups pipeline.
         if AUTOEP_LAYERS_KEY in state_dict:
             self._restore_autoep_expert_state(state_dict[AUTOEP_LAYERS_KEY])
+
+            # Sync FP32 master weights from the restored FP16 model weights
+            if getattr(self, '_autoep_expert_fp16_to_fp32', None):
+                for p_fp16, p_fp32 in self._autoep_expert_fp16_to_fp32:
+                    p_fp32.data.copy_(p_fp16.data)
+
+            if 'ds_autoep_expert_optimizer' in state_dict and getattr(self, '_autoep_expert_optimizer',
+                                                                      None) is not None:
+                if state_dict['ds_autoep_expert_optimizer'] is not None:
+                    self._autoep_expert_optimizer.load_state_dict(state_dict['ds_autoep_expert_optimizer'])
 
     # TODO: Support different/changing load/save DP degree.
     def load_state_dict(self,
