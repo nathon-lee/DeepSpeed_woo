@@ -130,13 +130,11 @@ class SynchronizedWallClockTimer:
 
     @staticmethod
     def memory_usage():
-        alloc = "mem_allocated: {:.4f} GB".format(get_accelerator().memory_allocated() / (1024 * 1024 * 1024))
-        max_alloc = "max_mem_allocated: {:.4f} GB".format(get_accelerator().max_memory_allocated() /
-                                                          (1024 * 1024 * 1024))
-        cache = "cache_allocated: {:.4f} GB".format(get_accelerator().memory_cached() / (1024 * 1024 * 1024))
-        max_cache = "max_cache_allocated: {:.4f} GB".format(get_accelerator().max_memory_cached() /
-                                                            (1024 * 1024 * 1024))
-        return " | {} | {} | {} | {}".format(alloc, max_alloc, cache, max_cache)
+        alloc = f"mem_allocated: {get_accelerator().memory_allocated() / (1024 * 1024 * 1024):.4f} GB"
+        max_alloc = f"max_mem_allocated: {get_accelerator().max_memory_allocated() / (1024 * 1024 * 1024):.4f} GB"
+        cache = f"cache_allocated: {get_accelerator().memory_cached() / (1024 * 1024 * 1024):.4f} GB"
+        max_cache = f"max_cache_allocated: {get_accelerator().max_memory_cached() / (1024 * 1024 * 1024):.4f} GB"
+        return f" | {alloc} | {max_alloc} | {cache} | {max_cache}"
 
     def log(self, names, normalizer=1.0, reset=True, memory_breakdown=False, ranks=None):
         """Log a group of timers."""
@@ -145,7 +143,7 @@ class SynchronizedWallClockTimer:
         for name in names:
             if name in self.timers:
                 elapsed_time = (self.timers[name].elapsed(reset=reset) / normalizer)
-                string += " | {}: {:.2f}".format(name, elapsed_time)
+                string += f" | {name}: {elapsed_time:.2f}"
 
         # timers logging should be independent of the global log level it's already conditional on wall_clock_breakdown being True, so using use_logger=False will always print the stats
         print_dist(string, ranks=ranks or [0])
@@ -262,26 +260,19 @@ class ThroughputTimer:
             if global_step:
                 if report_speed and self._is_report_boundary():
                     self.logging(
-                        "epoch={}/micro_step={}/global_step={}, RunningAvgSamplesPerSec={}, CurrSamplesPerSec={}, "
-                        "MemAllocated={}GB, MaxMemAllocated={}GB".format(
-                            self.epoch_count,
-                            self.micro_step_count,
-                            self.global_step_count,
-                            self.avg_samples_per_sec(),
-                            self.batch_size / (self.step_elapsed_time + TIME_EPSILON),
-                            round(get_accelerator().memory_allocated() / 1024**3, 2),
-                            round(get_accelerator().max_memory_allocated() / 1024**3, 2),
-                        ))
+                        f"epoch={self.epoch_count}/micro_step={self.micro_step_count}"
+                        f"/global_step={self.global_step_count}, "
+                        f"RunningAvgSamplesPerSec={self.avg_samples_per_sec()}, "
+                        f"CurrSamplesPerSec={self.batch_size / (self.step_elapsed_time + TIME_EPSILON)}, "
+                        f"MemAllocated={round(get_accelerator().memory_allocated() / 1024**3, 2)}GB, "
+                        f"MaxMemAllocated={round(get_accelerator().max_memory_allocated() / 1024**3, 2)}GB")
                     if self.monitor_memory:
                         virt_mem = psutil.virtual_memory()
                         swap = psutil.swap_memory()
-                        self.logging("epoch={}/micro_step={}/global_step={}, vm %: {}, swap %: {}".format(
-                            self.epoch_count,
-                            self.micro_step_count,
-                            self.global_step_count,
-                            virt_mem.percent,
-                            swap.percent,
-                        ))
+                        self.logging(
+                            f"epoch={self.epoch_count}/micro_step={self.micro_step_count}"
+                            f"/global_step={self.global_step_count}, "
+                            f"vm %: {virt_mem.percent}, swap %: {swap.percent}")
                 self.step_elapsed_time = 0
 
     def avg_samples_per_sec(self):
