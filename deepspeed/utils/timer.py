@@ -259,20 +259,18 @@ class ThroughputTimer:
 
             if global_step:
                 if report_speed and self._is_report_boundary():
-                    self.logging(
-                        f"epoch={self.epoch_count}/micro_step={self.micro_step_count}"
-                        f"/global_step={self.global_step_count}, "
-                        f"RunningAvgSamplesPerSec={self.avg_samples_per_sec()}, "
-                        f"CurrSamplesPerSec={self.batch_size / (self.step_elapsed_time + TIME_EPSILON)}, "
-                        f"MemAllocated={round(get_accelerator().memory_allocated() / 1024**3, 2)}GB, "
-                        f"MaxMemAllocated={round(get_accelerator().max_memory_allocated() / 1024**3, 2)}GB")
+                    self.logging(f"epoch={self.epoch_count}/micro_step={self.micro_step_count}"
+                                 f"/global_step={self.global_step_count}, "
+                                 f"RunningAvgSamplesPerSec={self.avg_samples_per_sec()}, "
+                                 f"CurrSamplesPerSec={self.batch_size / (self.step_elapsed_time + TIME_EPSILON)}, "
+                                 f"MemAllocated={round(get_accelerator().memory_allocated() / 1024**3, 2)}GB, "
+                                 f"MaxMemAllocated={round(get_accelerator().max_memory_allocated() / 1024**3, 2)}GB")
                     if self.monitor_memory:
                         virt_mem = psutil.virtual_memory()
                         swap = psutil.swap_memory()
-                        self.logging(
-                            f"epoch={self.epoch_count}/micro_step={self.micro_step_count}"
-                            f"/global_step={self.global_step_count}, "
-                            f"vm %: {virt_mem.percent}, swap %: {swap.percent}")
+                        self.logging(f"epoch={self.epoch_count}/micro_step={self.micro_step_count}"
+                                     f"/global_step={self.global_step_count}, "
+                                     f"vm %: {virt_mem.percent}, swap %: {swap.percent}")
                 self.step_elapsed_time = 0
 
     def avg_samples_per_sec(self):
