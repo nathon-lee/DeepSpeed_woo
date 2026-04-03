@@ -80,7 +80,7 @@ class TiedLayerSpec(LayerSpec):
         super().__init__(typename, *module_args, **module_kwargs)
         self.key = key
         self.forward_fn = forward_fn
-        self.tied_weight_attr = [tied_weight_attr] if type(tied_weight_attr) == str else tied_weight_attr
+        self.tied_weight_attr = [tied_weight_attr] if isinstance(tied_weight_attr, str) else tied_weight_attr
 
 
 class PipelineModule(nn.Module):

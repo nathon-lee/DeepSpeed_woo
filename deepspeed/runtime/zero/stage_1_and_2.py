@@ -2498,7 +2498,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         return all_state_dict[0][BASE_OPTIMIZER_STATE_STEP]
 
     def _restore_base_optimizer_state(self, base_optimizer_group_states, base_optimizer_state_step, group_paddings):
-        if type(base_optimizer_group_states) == dict:
+        if isinstance(base_optimizer_group_states, dict):
             base_optimizer_group_states = base_optimizer_group_states['state']
 
         saved_keys = base_optimizer_group_states[0].keys()
