@@ -638,6 +638,50 @@ class MockLlama4Transformer(nn.Module):
         self.model.layers = nn.ModuleList(layers)
 
 
+class MockDeepSeekV3Config:
+    model_type = "deepseek_v3"
+    n_routed_experts = 8
+    num_experts_per_tok = 2
+
+
+class MockDeepSeekV3Expert(nn.Module):
+    """Mimics a single DeepSeekV3 expert with split gate/up/down projections."""
+
+    def __init__(self, hidden_size=64, ffn_hidden=128):
+        super().__init__()
+        self.gate_proj = nn.Linear(hidden_size, ffn_hidden, bias=False)
+        self.up_proj = nn.Linear(hidden_size, ffn_hidden, bias=False)
+        self.down_proj = nn.Linear(ffn_hidden, hidden_size, bias=False)
+
+
+class MockDeepSeekV3MoEBlock(nn.Module):
+    """Mimics model.layers.N.mlp for DeepSeekV3-style MoE layers."""
+
+    def __init__(self, num_experts=8, ffn_hidden=128, hidden_size=64):
+        super().__init__()
+        self.gate = nn.Linear(hidden_size, num_experts, bias=False)
+        self.experts = nn.ModuleList([
+            MockDeepSeekV3Expert(hidden_size, ffn_hidden) for _ in range(num_experts)
+        ])
+        self.shared_experts = MockSharedExpert(hidden_size)
+
+
+class MockDeepSeekV3Transformer(nn.Module):
+    """Minimal transformer with DeepSeekV3-style ModuleList experts."""
+
+    def __init__(self, num_layers=2, num_experts=8):
+        super().__init__()
+        self.config = MockDeepSeekV3Config()
+        self.config.n_routed_experts = num_experts
+        self.model = nn.Module()
+        layers = []
+        for _ in range(num_layers):
+            layer = nn.Module()
+            layer.mlp = MockDeepSeekV3MoEBlock(num_experts)
+            layers.append(layer)
+        self.model.layers = nn.ModuleList(layers)
+
+
 class TestMoEDetection:
     """Phase 3 tests for MoE layer detection."""
 
@@ -698,6 +742,59 @@ class TestMoEDetection:
             assert spec.router_name == "router"
             assert spec.has_shared_experts is True
             assert spec.shared_experts_name == "shared_expert"
+
+    def test_deepseek_v3_old_fused_preset_assumption_fails(self):
+        """A fused gate_up_proj assumption cannot detect DeepSeekV3 ModuleList experts."""
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
+        config = AutoEPConfig(
+            enabled=True,
+            autoep_size=1,
+            moe_layer_pattern=r"model\.layers\.\d+\.mlp",
+            router_pattern="gate",
+            expert_pattern="experts",
+            expert_w1="gate_up_proj",
+            expert_w2="down_proj",
+            expert_w3=None,
+            num_experts_attr="n_routed_experts",
+            top_k_attr="num_experts_per_tok",
+            has_shared_experts=True,
+            shared_experts_pattern="shared_experts",
+        )
+        auto_ep = AutoEP(model, config)
+        specs = auto_ep.ep_parser()
+        assert specs == []
+
+    def test_deepseek_v3_split_expert_names_detect_successfully(self):
+        """Using split gate/up names detects the same DeepSeekV3 ModuleList experts."""
+        model = MockDeepSeekV3Transformer(num_layers=1, num_experts=8)
+        config = AutoEPConfig(
+            enabled=True,
+            autoep_size=1,
+            moe_layer_pattern=r"model\.layers\.\d+\.mlp",
+            router_pattern="gate",
+            expert_pattern="experts",
+            expert_w1="gate_proj",
+            expert_w2="down_proj",
+            expert_w3="up_proj",
+            num_experts_attr="n_routed_experts",
+            top_k_attr="num_experts_per_tok",
+            score_func="sigmoid",
+            has_shared_experts=True,
+            shared_experts_pattern="shared_experts",
+        )
+        auto_ep = AutoEP(model, config)
+        specs = auto_ep.ep_parser()
+        assert len(specs) == 1
+        spec = specs[0]
+        assert spec.model_family == "deepseek_v3"
+        assert spec.expert_storage == "module_list"
+        assert spec.expert_w1_name == "gate_proj"
+        assert spec.expert_w2_name == "down_proj"
+        assert spec.expert_w3_name == "up_proj"
+        assert spec.hidden_size == 64
+        assert spec.ffn_hidden_size == 128
+        assert spec.has_shared_experts is True
+        assert spec.shared_experts_name == "shared_experts"
 
     def test_replace_moe_layer_works(self):
         """replace_moe_layer creates AutoEPMoELayer replacement."""
