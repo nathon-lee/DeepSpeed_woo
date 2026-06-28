@@ -180,6 +180,34 @@ class TestZeROCheckpoint(DistributedTest):
 
         checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_module_only=True)
 
+    def test_elastic_checkpoint_is_deprecated_for_zero3(self, monkeypatch):
+        warning_messages = []
+
+        def mock_logger_warning(message, *args, **kwargs):
+            warning_messages.append(message)
+
+        monkeypatch.setattr("deepspeed.utils.logger.warning", mock_logger_warning)
+
+        config_dict = {
+            "train_batch_size": 2,
+            "optimizer": {
+                "type": 'Adam'
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "elastic_checkpoint": True,
+            }
+        }
+        if get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
+
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            _ = SimpleModel(10, empty_grad=False)
+
+        assert any("elastic checkpointing is deprecated" in str(message).lower() for message in warning_messages)
+
 
 class ws4_model_checkpoint(DistributedFixture):
     world_size = 4
