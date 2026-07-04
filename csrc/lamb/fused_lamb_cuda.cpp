@@ -63,19 +63,15 @@ at::Tensor lamb(at::Tensor& p,
         p_copy.numel() == num_elem || p_copy.numel() == 0,
         "number of elements in p_copy and p tensors should be equal, or p_copy should be empty");
 
-    // intermediate for weight L2 reduction
-    // make sure that the threads per block is at least 512 during the kernel launch otherwise the
-    // behaviour is unexpected
+    // Intermediate accumulators are scalar values updated atomically in kernel part1.
     at::Tensor w_l2_i = at::empty(
-        {512},
+        {1},
         p.options().dtype(p.type().scalarType() == at::ScalarType::Half ? at::ScalarType::Float
                                                                         : p.type().scalarType()));
 
-    // intermediate for update L2 reduction
-    // make sure that the threads per block is at least 512 during the kernel launch otherwise the
-    // behaviour is unexpected
+    // Intermediate accumulators are scalar values updated atomically in kernel part1.
     at::Tensor u_l2_i = at::empty(
-        {512},
+        {1},
         p.options().dtype(p.type().scalarType() == at::ScalarType::Half ? at::ScalarType::Float
                                                                         : p.type().scalarType()));
 
