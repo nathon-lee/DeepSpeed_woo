@@ -7,6 +7,17 @@
 
 const int unroll_factor = 4;
 
+__device__ __forceinline__ void ds_init_philox_state(curandStatePhilox4_32_10_t& state,
+                                                     std::pair<uint64_t, uint64_t> seed,
+                                                     uint64_t idx)
+{
+#ifdef DS_DROPOUT_EXPERIMENTAL_COUNTER_OFFSET
+    curand_init(seed.first, 0, seed.second + idx, &state);
+#else
+    curand_init(seed.first, idx, seed.second, &state);
+#endif
+}
+
 __global__ void dropout_kernel(const int N,
                                const float ratio,
                                float* out,
@@ -18,12 +29,14 @@ __global__ void dropout_kernel(const int N,
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     curandStatePhilox4_32_10_t state;
-    curand_init(seed.first, idx, seed.second, &state);
+    ds_init_philox_state(state, seed, idx);
+    uint32_t* mask_32 = reinterpret_cast<uint32_t*>(mask);
 
     CUDA_1D_KERNEL_LOOP(j, N / unroll_factor)
     {
         float4 rand = curand_uniform4(&state);
-        uint8_t m[unroll_factor];
+        uint32_t m_32;
+        uint8_t* m = reinterpret_cast<uint8_t*>(&m_32);
 
         m[0] = (uint8_t)(rand.x > ratio);
         m[1] = (uint8_t)(rand.y > ratio);
@@ -32,10 +45,7 @@ __global__ void dropout_kernel(const int N,
 
         int i = j * unroll_factor;
 
-        mask[i] = (uint8_t)m[0];
-        mask[i + 1] = (uint8_t)m[1];
-        mask[i + 2] = (uint8_t)m[2];
-        mask[i + 3] = (uint8_t)m[3];
+        mask_32[j] = m_32;
 
         out[i] = Xdata[i] * scale * m[0];
         out[i + 1] = Xdata[i + 1] * scale * m[1];
@@ -68,14 +78,19 @@ __global__ void dropout_kernel(const int N,
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     curandStatePhilox4_32_10_t state;
-    curand_init(seed.first, idx, seed.second, &state);
+    ds_init_philox_state(state, seed, idx);
 
 #ifdef __STOCHASTIC_MODE__
 
     const __half2 h_scale = __float2half2_rn(scale);
     const float2* x_cast = reinterpret_cast<const float2*>(Xdata);
     float2* out_cast = reinterpret_cast<float2*>(out);
+
+#endif
+
     uint32_t* mask_cast = reinterpret_cast<uint32_t*>(mask);
+
+#ifdef __STOCHASTIC_MODE__
 
     uint32_t m_32;
     uint8_t* m = reinterpret_cast<uint8_t*>(&m_32);
@@ -135,10 +150,13 @@ __global__ void dropout_kernel(const int N,
         out[i + 2] = __float2half(vals_half_f[1].x * scale * m[2]);
         out[i + 3] = __float2half(vals_half_f[1].y * scale * m[3]);
 
-        mask[i] = m[0];
-        mask[i + 1] = m[1];
-        mask[i + 2] = m[2];
-        mask[i + 3] = m[3];
+        uint32_t m_32;
+        uint8_t* m_packed = reinterpret_cast<uint8_t*>(&m_32);
+        m_packed[0] = m[0];
+        m_packed[1] = m[1];
+        m_packed[2] = m[2];
+        m_packed[3] = m[3];
+        mask_cast[j] = m_32;
     }
 
 #endif
@@ -480,7 +498,7 @@ __global__ void dropout_kernel(const int N,
     int tid = threadIdx.x % (dim / unroll_factor);
 
     curandStatePhilox4_32_10_t state;
-    curand_init(seed.first, idx, seed.second, &state);
+    ds_init_philox_state(state, seed, idx);
 
     float4* Xdata_cast = reinterpret_cast<float4*>(Xdata);
     uint32_t* mask_32 = reinterpret_cast<uint32_t*>(mask);
@@ -541,7 +559,7 @@ __global__ void dropout_kernel(const int N,
     int tid = threadIdx.x % (dim / unroll_factor);
 
     curandStatePhilox4_32_10_t state;
-    curand_init(seed.first, idx, seed.second, &state);
+    ds_init_philox_state(state, seed, idx);
 
     float2* Xdata_cast = reinterpret_cast<float2*>(Xdata);
     uint32_t* mask_32 = reinterpret_cast<uint32_t*>(mask);
@@ -661,7 +679,7 @@ __global__ void dropout_kernel(const int N,
     int tid = threadIdx.x % (dim / unroll_factor);
 
     curandStatePhilox4_32_10_t state;
-    curand_init(seed.first, idx, seed.second, &state);
+    ds_init_philox_state(state, seed, idx);
 
     float4* out_cast = reinterpret_cast<float4*>(out);
     uint32_t* mask_32 = reinterpret_cast<uint32_t*>(mask);
@@ -738,7 +756,7 @@ __global__ void dropout_kernel(const int N,
     int tid = threadIdx.x % (dim / unroll_factor);
 
     curandStatePhilox4_32_10_t state;
-    curand_init(seed.first, idx, seed.second, &state);
+    ds_init_philox_state(state, seed, idx);
 
     float2* out_cast = reinterpret_cast<float2*>(out);
     uint32_t* mask_32 = reinterpret_cast<uint32_t*>(mask);
