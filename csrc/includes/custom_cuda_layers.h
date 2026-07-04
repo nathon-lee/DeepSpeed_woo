@@ -67,6 +67,8 @@ void launch_d_gelu(T* d_output,
                    cudaStream_t stream);
 
 // Custom fused bias add with layer normalization
+// NOTE: preLayerNorm is retained for legacy call-site compatibility.
+// The current CUDA normalize kernels do not branch on this flag.
 template <typename T>
 void launch_bias_residual_layer_norm(T* vals,
                                      const T* residual,
