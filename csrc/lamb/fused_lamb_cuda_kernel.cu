@@ -191,6 +191,125 @@ __device__ void reduce_two_vectors_in_register(T a, T b, T* g_a, T* g_b)
     reduce_block_in_shared_memory<T, blockSize>(s_a, s_b, g_a, g_b);
 }
 
+template <typename T>
+__device__ inline void lamb_atomic_add(T* addr, T val);
+
+template <>
+__device__ inline void lamb_atomic_add<float>(float* addr, float val)
+{
+    atomicAdd(addr, val);
+}
+
+template <>
+__device__ inline void lamb_atomic_add<double>(double* addr, double val)
+{
+    atomicAdd(addr, val);
+}
+
+template <typename T, int blockSize>
+__device__ void reduce_two_vectors_in_register_atomic(T a, T b, T* g_a, T* g_b)
+{
+    const int threadIdInBlock = cg::this_thread_block().thread_rank();
+
+    T* s_a = SharedMemory<T>();
+    T* s_b = SharedMemory<T>() + cg::this_thread_block().size();
+
+    s_a[threadIdInBlock] = a;
+    s_b[threadIdInBlock] = b;
+
+    cg::thread_block cta = cg::this_thread_block();
+    cg::sync(cta);
+
+    if ((blockSize >= 512) && (threadIdInBlock < 256)) {
+        s_a[threadIdInBlock] += s_a[threadIdInBlock + 256];
+        s_b[threadIdInBlock] += s_b[threadIdInBlock + 256];
+    }
+    cg::sync(cta);
+
+    if ((blockSize >= 256) && (threadIdInBlock < 128)) {
+        s_a[threadIdInBlock] += s_a[threadIdInBlock + 128];
+        s_b[threadIdInBlock] += s_b[threadIdInBlock + 128];
+    }
+    cg::sync(cta);
+
+    if ((blockSize >= 128) && (threadIdInBlock < 64)) {
+        s_a[threadIdInBlock] += s_a[threadIdInBlock + 64];
+        s_b[threadIdInBlock] += s_b[threadIdInBlock + 64];
+    }
+    cg::sync(cta);
+
+    T a_sum = s_a[threadIdInBlock];
+    T b_sum = s_b[threadIdInBlock];
+
+#if (__CUDA_ARCH__ >= 300) || (defined(__HIP_PLATFORM_AMD__) && HIP_VERSION >= 502)
+    if (threadIdInBlock < 32) {
+        cg::coalesced_group active = cg::coalesced_threads();
+
+        if (blockSize >= 64) {
+            a_sum += s_a[threadIdInBlock + 32];
+            b_sum += s_b[threadIdInBlock + 32];
+        }
+
+        for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+            a_sum += active.shfl_down(a_sum, offset);
+            b_sum += active.shfl_down(b_sum, offset);
+        }
+
+        if (threadIdInBlock == 0) {
+            lamb_atomic_add<T>(g_a, a_sum);
+            lamb_atomic_add<T>(g_b, b_sum);
+        }
+    }
+#else
+    if ((blockSize >= 64) && (threadIdInBlock < 32)) {
+        s_a[threadIdInBlock] = a_sum = a_sum + s_a[threadIdInBlock + 32];
+        s_b[threadIdInBlock] = b_sum = b_sum + s_b[threadIdInBlock + 32];
+    }
+
+    cg::sync(cta);
+
+    if ((blockSize >= 32) && (threadIdInBlock < 16)) {
+        s_a[threadIdInBlock] = a_sum = a_sum + s_a[threadIdInBlock + 16];
+        s_b[threadIdInBlock] = b_sum = b_sum + s_b[threadIdInBlock + 16];
+    }
+
+    cg::sync(cta);
+
+    if ((blockSize >= 16) && (threadIdInBlock < 8)) {
+        s_a[threadIdInBlock] = a_sum = a_sum + s_a[threadIdInBlock + 8];
+        s_b[threadIdInBlock] = b_sum = b_sum + s_b[threadIdInBlock + 8];
+    }
+
+    cg::sync(cta);
+
+    if ((blockSize >= 8) && (threadIdInBlock < 4)) {
+        s_a[threadIdInBlock] = a_sum = a_sum + s_a[threadIdInBlock + 4];
+        s_b[threadIdInBlock] = b_sum = b_sum + s_b[threadIdInBlock + 4];
+    }
+
+    cg::sync(cta);
+
+    if ((blockSize >= 4) && (threadIdInBlock < 2)) {
+        s_a[threadIdInBlock] = a_sum = a_sum + s_a[threadIdInBlock + 2];
+        s_b[threadIdInBlock] = b_sum = b_sum + s_b[threadIdInBlock + 2];
+    }
+
+    cg::sync(cta);
+
+    if ((blockSize >= 2) && (threadIdInBlock < 1)) {
+        s_a[threadIdInBlock] = a_sum = a_sum + s_a[threadIdInBlock + 1];
+        s_b[threadIdInBlock] = b_sum = b_sum + s_b[threadIdInBlock + 1];
+    }
+
+    cg::sync(cta);
+
+    if (threadIdInBlock == 0) {
+        lamb_atomic_add<T>(g_a, a_sum);
+        lamb_atomic_add<T>(g_b, b_sum);
+    }
+#endif
+}
+
 template <typename T, typename GRAD_T, int blockSize>
 __global__ void lamb_cuda_kernel_part1(
     T* __restrict__ p,
@@ -235,7 +354,7 @@ __global__ void lamb_cuda_kernel_part1(
         reg_w += pj * pj;
     }
 
-    reduce_two_vectors_in_register<T, blockSize>(reg_w, reg_u, w_l2_i, u_l2_i);
+    reduce_two_vectors_in_register_atomic<T, blockSize>(reg_w, reg_u, w_l2_i, u_l2_i);
 }
 
 template <typename T, typename GRAD_T, int blockSize>
@@ -380,6 +499,11 @@ void fused_lamb_cuda(at::Tensor& p,
             g.scalar_type(), "lamb_cuda_kernel", ([&] {
                 using accscalar_t = at::acc_type<scalar_t, true>;
 
+                C10_CUDA_CHECK(
+                    cudaMemsetAsync(w_l2_i.data<accscalar_t>(), 0, sizeof(accscalar_t), stream));
+                C10_CUDA_CHECK(
+                    cudaMemsetAsync(u_l2_i.data<accscalar_t>(), 0, sizeof(accscalar_t), stream));
+
                 lamb_cuda_kernel_part1<accscalar_t, scalar_t, threadsPerBlock>
                     <<<blocks, threadsPerBlock, smemsize, stream>>>(
                         p.data<accscalar_t>(),
@@ -397,10 +521,6 @@ void fused_lamb_cuda(at::Tensor& p,
                         decay,
                         w_l2_i.data<accscalar_t>(),
                         u_l2_i.data<accscalar_t>());
-
-                lamb_cuda_kernel_part2<accscalar_t, scalar_t, threadsPerBlock>
-                    <<<1, threadsPerBlock, smemsize, stream>>>(
-                        num_blocks, w_l2_i.data<accscalar_t>(), u_l2_i.data<accscalar_t>());
 
                 lamb_cuda_kernel_part3<accscalar_t, scalar_t>
                     <<<blocks, threadsPerBlock, smemsize, stream>>>(
@@ -427,6 +547,11 @@ void fused_lamb_cuda(at::Tensor& p,
         using namespace at;
         AT_DISPATCH_FLOATING_TYPES(
             g.scalar_type(), "lamb_cuda_kernel", ([&] {
+                C10_CUDA_CHECK(
+                    cudaMemsetAsync(w_l2_i.data<scalar_t>(), 0, sizeof(scalar_t), stream));
+                C10_CUDA_CHECK(
+                    cudaMemsetAsync(u_l2_i.data<scalar_t>(), 0, sizeof(scalar_t), stream));
+
                 lamb_cuda_kernel_part1<scalar_t, scalar_t, threadsPerBlock>
                     <<<blocks, threadsPerBlock, smemsize, stream>>>(
                         p.data<scalar_t>(),
@@ -444,10 +569,6 @@ void fused_lamb_cuda(at::Tensor& p,
                         decay,
                         w_l2_i.data<scalar_t>(),
                         u_l2_i.data<scalar_t>());
-
-                lamb_cuda_kernel_part2<scalar_t, scalar_t, threadsPerBlock>
-                    <<<1, threadsPerBlock, smemsize, stream>>>(
-                        num_blocks, w_l2_i.data<scalar_t>(), u_l2_i.data<scalar_t>());
 
                 lamb_cuda_kernel_part3<scalar_t, scalar_t>
                     <<<blocks, threadsPerBlock, smemsize, stream>>>(
