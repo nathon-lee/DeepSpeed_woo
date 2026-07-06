@@ -23,7 +23,6 @@ __global__ void fused_bias_residual_layer_norm(float* vals,
                                                const float* gamma,
                                                const float* beta,
                                                float epsilon,
-                                               bool preLayerNorm,
                                                bool training,
                                                float* vars,
                                                float* means,
@@ -124,7 +123,6 @@ __global__ void fused_bias_residual_layer_norm(__half* vals,
                                                const __half* gamma,
                                                const __half* beta,
                                                float epsilon,
-                                               bool preLayerNorm,
                                                bool training,
                                                __half* vars,
                                                __half* means,
@@ -263,6 +261,8 @@ void launch_bias_residual_layer_norm<float>(float* vals,
                                             float* vars,
                                             float* means)
 {
+    (void)preLayerNorm;
+
     int threads = THREADS;
 
     dim3 grid_dim(batch_size);
@@ -277,7 +277,7 @@ void launch_bias_residual_layer_norm<float>(float* vals,
     dim3 block_dim(threads);
 
     fused_bias_residual_layer_norm<<<grid_dim, block_dim, 0, stream>>>(
-        vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means, hidden_dim);
+        vals, residual, gamma, beta, epsilon, training, vars, means, hidden_dim);
 }
 
 template <>
@@ -294,6 +294,8 @@ void launch_bias_residual_layer_norm<__half>(__half* vals,
                                              __half* vars,
                                              __half* means)
 {
+    (void)preLayerNorm;
+
     int threads = 128;
 
     dim3 grid_dim(batch_size);
@@ -310,7 +312,7 @@ void launch_bias_residual_layer_norm<__half>(__half* vals,
     dim3 block_dim(threads);
 
     fused_bias_residual_layer_norm<<<grid_dim, block_dim, 0, stream>>>(
-        vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means, hidden_dim / 2);
+        vals, residual, gamma, beta, epsilon, training, vars, means, hidden_dim / 2);
 }
 
 __global__ void fused_bias_residual_layer_norm(float* vals,
@@ -318,7 +320,6 @@ __global__ void fused_bias_residual_layer_norm(float* vals,
                                                const float* gamma,
                                                const float* beta,
                                                float epsilon,
-                                               bool preLayerNorm,
                                                bool training,
                                                float* vars,
                                                int row_stride)
@@ -416,7 +417,6 @@ __global__ void fused_bias_residual_layer_norm(__half* vals,
                                                const __half* gamma,
                                                const __half* beta,
                                                float epsilon,
-                                               bool preLayerNorm,
                                                bool training,
                                                __half* vars,
                                                int row_stride)
@@ -566,6 +566,8 @@ void launch_bias_residual_layer_norm<float>(float* vals,
                                             bool training,
                                             float* vars)
 {
+    (void)preLayerNorm;
+
     int threads = THREADS;
 
     dim3 grid_dim(batch_size);
@@ -582,7 +584,7 @@ void launch_bias_residual_layer_norm<float>(float* vals,
     dim3 block_dim(threads);
 
     fused_bias_residual_layer_norm<<<grid_dim, block_dim, 0, stream>>>(
-        vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, hidden_dim);
+        vals, residual, gamma, beta, epsilon, training, vars, hidden_dim);
 }
 
 template <>
@@ -598,6 +600,8 @@ void launch_bias_residual_layer_norm<__half>(__half* vals,
                                              bool training,
                                              __half* vars)
 {
+    (void)preLayerNorm;
+
     int threads = 128;
 
     dim3 grid_dim(batch_size);
@@ -615,7 +619,7 @@ void launch_bias_residual_layer_norm<__half>(__half* vals,
 
     dim3 block_dim(threads);
     fused_bias_residual_layer_norm<<<grid_dim, block_dim, 0, stream>>>(
-        vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, hidden_dim / 2);
+        vals, residual, gamma, beta, epsilon, training, vars, hidden_dim / 2);
 }
 
 /* Normalize Gamma & Betta gradients
