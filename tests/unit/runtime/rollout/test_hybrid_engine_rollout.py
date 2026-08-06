@@ -37,6 +37,7 @@ def _make_tokenizer():
 def test_config_defaults():
     cfg = HybridEngineRolloutConfig()
     assert cfg.use_graph_capture is False
+    assert cfg.enable_profiling is False
 
 
 # -- constructor --------------------------------------------------------
@@ -45,9 +46,10 @@ def test_config_defaults():
 def test_constructor_stores_config():
     engine = _make_engine()
     tok = _make_tokenizer()
-    cfg = HybridEngineRolloutConfig(use_graph_capture=True)
+    cfg = HybridEngineRolloutConfig(use_graph_capture=True, enable_profiling=True)
     rollout = HybridEngineRollout(engine, tok, cfg=cfg)
     assert rollout.use_graph_capture is True
+    assert rollout.enable_profiling is True
     assert rollout.engine is engine
     assert rollout.tokenizer is tok
 
@@ -55,6 +57,31 @@ def test_constructor_stores_config():
 def test_constructor_defaults_without_cfg():
     rollout = HybridEngineRollout(_make_engine(), _make_tokenizer())
     assert rollout.use_graph_capture is False
+    assert rollout.enable_profiling is False
+
+
+def test_generate_records_profile_when_enabled():
+    engine = _make_engine()
+    tok = _make_tokenizer()
+    cfg = HybridEngineRolloutConfig(enable_profiling=True)
+    rollout = HybridEngineRollout(engine, tok, cfg=cfg)
+    rollout.engine.module.generate.return_value = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.long)
+
+    req = MagicMock()
+    req.prompt_ids = torch.tensor([[1, 2]])
+    req.prompt_attention_mask = torch.ones(1, 2, dtype=torch.long)
+    sampling = MagicMock()
+    sampling.temperature = 0
+    sampling.n_samples_per_prompt = 1
+    sampling.max_new_tokens = 3
+
+    rollout.generate(req, sampling)
+
+    profile = rollout.get_last_profile()
+    assert profile is not None
+    assert profile["total_ms"] >= 0.0
+    assert profile["generation_ms"] >= 0.0
+    assert profile["num_generated_tokens"] == 2
 
 
 # -- _sample_top_p ------------------------------------------------------
