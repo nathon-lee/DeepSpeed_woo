@@ -65,7 +65,7 @@ def test_generate_records_profile_when_enabled():
     tok = _make_tokenizer()
     cfg = HybridEngineRolloutConfig(enable_profiling=True)
     rollout = HybridEngineRollout(engine, tok, cfg=cfg)
-    rollout.engine.module.generate.return_value = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.long)
+    rollout.engine.module.generate.return_value = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
 
     req = MagicMock()
     req.prompt_ids = torch.tensor([[1, 2]])
