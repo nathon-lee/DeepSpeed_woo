@@ -12,6 +12,7 @@ Two generation paths:
      launch overhead.
 """
 
+import time
 from dataclasses import dataclass
 
 import torch
@@ -24,6 +25,7 @@ from deepspeed.runtime.rollout.base import RolloutBatch, RolloutEngine, RolloutR
 class HybridEngineRolloutConfig:
     """Configuration for HybridEngineRollout."""
     use_graph_capture: bool = False
+    enable_profiling: bool = False
 
 
 class HybridEngineRollout(RolloutEngine):
@@ -39,9 +41,12 @@ class HybridEngineRollout(RolloutEngine):
         self.engine = engine
         self.tokenizer = tokenizer
         self.use_graph_capture = getattr(cfg, 'use_graph_capture', False) if cfg else False
+        self.enable_profiling = getattr(cfg, 'enable_profiling', False) if cfg else False
+        self._last_profile = None
 
     @torch.no_grad()
     def generate(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
+        start_time = time.perf_counter() if self.enable_profiling else 0.0
         device = request.prompt_ids.device
         B = request.prompt_ids.shape[0]
         n = sampling.n_samples_per_prompt
@@ -86,11 +91,23 @@ class HybridEngineRollout(RolloutEngine):
             prompt_valid = request.prompt_attention_mask[i // n if B > 1 else 0]
             attention_mask[i, :prompt_len] = prompt_valid
 
+        if self.enable_profiling:
+            total_ms = (time.perf_counter() - start_time) * 1000.0
+            self._last_profile = {
+                "total_ms": total_ms,
+                "generation_ms": total_ms,
+                "num_generated_tokens": int(output_ids.shape[1] - prompt_len),
+            }
+
         return RolloutBatch(
             input_ids=output_ids,
             attention_mask=attention_mask,
             response_start_idx=torch.full((total, ), response_start, dtype=torch.long, device=device),
         )
+
+    def get_last_profile(self):
+        """Return the most recent profiling snapshot for this rollout instance."""
+        return self._last_profile
 
     # ------------------------------------------------------------------
     # Graph capture decode loop (greedy only)
