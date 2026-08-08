@@ -103,6 +103,15 @@ class DeepSpeedTransformerInference(nn.Module):
                 self.config.min_out_tokens)
             self._should_allocate_workspace = False
 
+    @staticmethod
+    def _unpack_input(input, attn_mask):
+        if isinstance(input, tuple):
+            tuple_input = input
+            input = tuple_input[0]
+            if attn_mask is None and len(tuple_input) > 1:
+                attn_mask = tuple_input[1]
+        return input, attn_mask
+
     @classmethod
     def reset_cache(cls):
         if cls.workspace is not None:
@@ -137,6 +146,8 @@ class DeepSpeedTransformerInference(nn.Module):
         if "hidden_states" in kwargs:
             input = kwargs["hidden_states"]
 
+        input, attn_mask = self._unpack_input(input, attn_mask)
+
         if layer_past is not None and past_key_value is not None:
             raise ValueError("Only one of `layer_past` or `past_key_value` can be present.")
 
@@ -153,10 +164,6 @@ class DeepSpeedTransformerInference(nn.Module):
         _layer_past = layer_past or past_key_value or self.layer_past
         head_mask = layer_head_mask if layer_head_mask is not None else head_mask
 
-        attn_mask = None
-        if isinstance(input, tuple):
-            attn_mask = input[1]
-            input = input[0]
         input_type = input.dtype
 
         if (self.config.dtype in [torch.float16, torch.bfloat16, torch.int8]) \

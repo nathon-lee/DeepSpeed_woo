@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from benchmarks.opsd.benchmark_hybrid_engine_rollout import _summarize
+from deepspeed.model_implementations.transformers.ds_transformer import DeepSpeedTransformerInference
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import (
     HybridEngineRollout,
@@ -156,6 +157,16 @@ def test_benchmark_summarizes_profile_samples():
 
     assert summary["generation_ms"] == {"mean": 21, "p50": 21.0, "p95": 38}
     assert summary["tokens_per_second"] == {"mean": 105, "p50": 105.0, "p95": 190}
+
+
+def test_transformer_inference_unpacks_tuple_input_before_forward():
+    hidden_states = torch.randn(2, 4, 8)
+    attention_mask = torch.ones(2, 4)
+
+    unpacked_input, unpacked_mask = DeepSpeedTransformerInference._unpack_input((hidden_states, attention_mask), None)
+
+    assert unpacked_input is hidden_states
+    assert unpacked_mask is attention_mask
 
 
 # -- _sample_top_p ------------------------------------------------------
