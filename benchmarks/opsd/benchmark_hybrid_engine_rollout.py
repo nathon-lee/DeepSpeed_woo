@@ -14,7 +14,13 @@ import json
 import math
 import os
 import statistics
+import sys
 from pathlib import Path
+
+# Running a nested script does not automatically put the repository root on
+# sys.path. Prefer the checkout under test over an older installed DeepSpeed.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO_ROOT))
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -149,35 +155,38 @@ def _run(args):
     device = accelerator.device_name(local_rank)
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
 
-    model, tokenizer = _load_model_and_tokenizer(args.model, dtype, device)
-    engine = _build_engine(model, args)
-    rollout = HybridEngineRollout(engine, tokenizer, HybridEngineRolloutConfig(enable_profiling=True))
+    try:
+        model, tokenizer = _load_model_and_tokenizer(args.model, dtype, device)
+        engine = _build_engine(model, args)
+        rollout = HybridEngineRollout(engine, tokenizer, HybridEngineRolloutConfig(enable_profiling=True))
 
-    cases = []
-    matrix = itertools.product(args.batch_sizes, args.samples_per_prompt, args.prompt_lengths, args.response_lengths)
-    for batch_size, samples_per_prompt, prompt_length, response_length in matrix:
-        cases.append(
-            _run_case(rollout, engine.module, args, batch_size, samples_per_prompt, prompt_length, response_length,
-                      device))
+        cases = []
+        matrix = itertools.product(args.batch_sizes, args.samples_per_prompt, args.prompt_lengths,
+                                   args.response_lengths)
+        for batch_size, samples_per_prompt, prompt_length, response_length in matrix:
+            cases.append(
+                _run_case(rollout, engine.module, args, batch_size, samples_per_prompt, prompt_length, response_length,
+                          device))
 
-    result = {
-        "model": args.model,
-        "dtype": args.dtype,
-        "device": device,
-        "warmup": args.warmup,
-        "iterations": args.iterations,
-        "temperature": args.temperature,
-        "top_p": args.top_p,
-        "release_inference_cache": args.release_inference_cache,
-        "cases": cases,
-    }
-    if not dist.is_initialized() or dist.get_rank() == 0:
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-        print(f"Wrote benchmark results to {output_path}")
-    if dist.is_initialized():
-        dist.destroy_process_group()
+        result = {
+            "model": args.model,
+            "dtype": args.dtype,
+            "device": device,
+            "warmup": args.warmup,
+            "iterations": args.iterations,
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "release_inference_cache": args.release_inference_cache,
+            "cases": cases,
+        }
+        if not dist.is_initialized() or dist.get_rank() == 0:
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+            print(f"Wrote benchmark results to {output_path}")
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
 
 def main():
