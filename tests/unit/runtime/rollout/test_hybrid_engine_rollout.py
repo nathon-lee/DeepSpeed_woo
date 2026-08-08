@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from benchmarks.opsd.benchmark_hybrid_engine_rollout import _summarize
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import (
     HybridEngineRollout,
@@ -138,6 +139,23 @@ def test_profiling_does_not_change_rollout_output():
     assert torch.equal(output_with_profiling.input_ids, output_without_profiling.input_ids)
     assert torch.equal(output_with_profiling.attention_mask, output_without_profiling.attention_mask)
     assert torch.equal(output_with_profiling.response_start_idx, output_without_profiling.response_start_idx)
+
+
+def test_benchmark_summarizes_profile_samples():
+    profiles = []
+    for value in range(1, 21):
+        profiles.append({
+            "prompt_expansion_ms": value,
+            "generation_ms": value * 2,
+            "post_processing_ms": value * 3,
+            "total_ms": value * 6,
+            "tokens_per_second": value * 10,
+        })
+
+    summary = _summarize(profiles)
+
+    assert summary["generation_ms"] == {"mean": 21, "p50": 21.0, "p95": 38}
+    assert summary["tokens_per_second"] == {"mean": 105, "p50": 105.0, "p95": 190}
 
 
 # -- _sample_top_p ------------------------------------------------------
