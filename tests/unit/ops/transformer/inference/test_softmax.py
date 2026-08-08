@@ -7,6 +7,7 @@ import pytest
 import torch
 import deepspeed
 from deepspeed.ops.op_builder import InferenceBuilder
+from deepspeed.ops.transformer.inference.op_binding.softmax_context import SoftmaxContextOp
 
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
     pytest.skip("Inference ops are not available on this system", allow_module_level=True)
@@ -29,6 +30,14 @@ def run_softmax_ds(input, use_triton_ops=False):
         return softmax(input)
 
     assert use_triton_ops, "Only triton softmax is supported for now"
+
+
+def test_empty_alibi_uses_query_device():
+    query_key_value = torch.empty(1, device="meta")
+
+    alibi = SoftmaxContextOp.empty_alibi(query_key_value)
+
+    assert alibi.device == query_key_value.device
 
 
 @pytest.mark.inference_ops

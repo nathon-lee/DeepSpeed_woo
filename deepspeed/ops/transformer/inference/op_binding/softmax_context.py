@@ -46,6 +46,10 @@ class SoftmaxContextOp(BaseOp):
         return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
     @staticmethod
+    def empty_alibi(query_key_value: torch.Tensor) -> torch.Tensor:
+        return torch.empty(1, device=query_key_value.device)
+
+    @staticmethod
     def bias_add_transform_0213(input, bias, num_heads, trans_count, perform_bias=False):
         assert trans_count == 1 or trans_count == 3, F"Trans count {trans_count} is not supported"
         assert input.dim() == 3, F"Dim {input.dim()} is not supported"
@@ -133,7 +137,7 @@ class SoftmaxContextOp(BaseOp):
             offset = dist.get_rank() * batch_heads if dist.is_initialized() else 0
             alibi = alibi[offset:batch_heads + offset, :, :]
         else:
-            alibi = torch.empty(1)
+            alibi = self.empty_alibi(query_key_value)
 
         output = self.softmax_context_func(query_key_value, attn_mask, self.config.rotary_dim, self.config.rotate_half,
                                            self.config.rotate_every_two, heads, num_kv, norm_factor,
