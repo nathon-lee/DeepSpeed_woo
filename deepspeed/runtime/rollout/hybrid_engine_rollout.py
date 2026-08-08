@@ -46,7 +46,6 @@ class HybridEngineRollout(RolloutEngine):
 
     @torch.no_grad()
     def generate(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
-        start_time = time.perf_counter() if self.enable_profiling else 0.0
         device = request.prompt_ids.device
         B = request.prompt_ids.shape[0]
         n = sampling.n_samples_per_prompt
@@ -57,6 +56,11 @@ class HybridEngineRollout(RolloutEngine):
 
         module = self.engine.module
 
+        if self.enable_profiling:
+            accelerator = get_accelerator()
+            accelerator.synchronize()
+            profile_start = time.perf_counter()
+
         # Expand prompts for n samples per prompt
         if n > 1:
             prompt_ids = request.prompt_ids.repeat_interleave(n, dim=0)
@@ -64,6 +68,10 @@ class HybridEngineRollout(RolloutEngine):
         else:
             prompt_ids = request.prompt_ids
             prompt_attn = request.prompt_attention_mask
+
+        if self.enable_profiling:
+            accelerator.synchronize()
+            expansion_end = time.perf_counter()
 
         is_greedy = sampling.temperature <= 0.0
 
@@ -82,28 +90,50 @@ class HybridEngineRollout(RolloutEngine):
                 pad_token_id=pad_token_id,
             )
 
+        if self.enable_profiling:
+            accelerator.synchronize()
+            generation_end = time.perf_counter()
+
         # Build attention mask: pad positions (both left padding from prompt
         # and right padding from EOS / shorter sequences) are 0.
-        full_len = output_ids.shape[1]
         response_start = prompt_len
         attention_mask = (output_ids != pad_token_id).long()
         for i in range(total):
             prompt_valid = request.prompt_attention_mask[i // n if B > 1 else 0]
             attention_mask[i, :prompt_len] = prompt_valid
 
-        if self.enable_profiling:
-            total_ms = (time.perf_counter() - start_time) * 1000.0
-            self._last_profile = {
-                "total_ms": total_ms,
-                "generation_ms": total_ms,
-                "num_generated_tokens": int(output_ids.shape[1] - prompt_len),
-            }
-
-        return RolloutBatch(
+        rollout_batch = RolloutBatch(
             input_ids=output_ids,
             attention_mask=attention_mask,
             response_start_idx=torch.full((total, ), response_start, dtype=torch.long, device=device),
         )
+
+        if self.enable_profiling:
+            accelerator.synchronize()
+            post_processing_end = time.perf_counter()
+            prompt_expansion_ms = (expansion_end - profile_start) * 1000.0
+            generation_ms = (generation_end - expansion_end) * 1000.0
+            post_processing_ms = (post_processing_end - generation_end) * 1000.0
+            total_ms = (post_processing_end - profile_start) * 1000.0
+            response_length = int(output_ids.shape[1] - prompt_len)
+            num_generated_tokens = int(output_ids.shape[0] * response_length)
+            tokens_per_second = 0.0
+            if total_ms > 0.0:
+                tokens_per_second = num_generated_tokens / (total_ms / 1000.0)
+            self._last_profile = {
+                "prompt_expansion_ms": prompt_expansion_ms,
+                "generation_ms": generation_ms,
+                "post_processing_ms": post_processing_ms,
+                "total_ms": total_ms,
+                "num_generated_tokens": num_generated_tokens,
+                "tokens_per_second": tokens_per_second,
+                "batch_size": B,
+                "num_samples_per_prompt": n,
+                "prompt_length": prompt_len,
+                "response_length": response_length,
+            }
+
+        return rollout_batch
 
     def get_last_profile(self):
         """Return the most recent profiling snapshot for this rollout instance."""
