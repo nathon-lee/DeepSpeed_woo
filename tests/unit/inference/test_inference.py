@@ -3,10 +3,11 @@
 
 # DeepSpeed Team
 
-import pytest
-
+import math
 import os
 import time
+
+import pytest
 
 import deepspeed
 import torch
@@ -302,6 +303,39 @@ def validate_test(model_w_task, dtype, enable_cuda_graph, enable_triton):
     return msg
 
 
+def _performance_regression_limit():
+    """Return the opt-in slowdown limit for inference regression checks."""
+    value = os.getenv("DS_INFERENCE_PERF_MAX_SLOWDOWN")
+    if value is None:
+        return None
+    try:
+        limit = float(value)
+    except ValueError as exc:
+        raise ValueError("DS_INFERENCE_PERF_MAX_SLOWDOWN must be a positive number") from exc
+    if limit <= 0:
+        raise ValueError("DS_INFERENCE_PERF_MAX_SLOWDOWN must be a positive number")
+    return limit
+
+
+def _assert_performance_regression(baseline_ms, deepspeed_ms):
+    """Check inference latency when explicitly enabled by the test runner.
+
+    Hardware and model loading make latency assertions unsuitable for the normal
+    inference suite. CI performance jobs can opt in with
+    ``DS_INFERENCE_PERF_MAX_SLOWDOWN`` (for example, ``1.10``).
+    """
+    limit = _performance_regression_limit()
+    if limit is None:
+        return
+    if not (math.isfinite(baseline_ms) and math.isfinite(deepspeed_ms)):
+        raise AssertionError(f"non-finite inference latency: baseline={baseline_ms}, deepspeed={deepspeed_ms}")
+    if baseline_ms <= 0 or deepspeed_ms < 0:
+        raise AssertionError(f"invalid inference latency: baseline={baseline_ms}, deepspeed={deepspeed_ms}")
+    slowdown = deepspeed_ms / baseline_ms
+    assert slowdown <= limit, (f"inference performance regression: DeepSpeed={deepspeed_ms:.3f} ms, "
+                               f"baseline={baseline_ms:.3f} ms, slowdown={slowdown:.3f}x, limit={limit:.3f}x")
+
+
 @pytest.mark.inference
 class TestModelTask(DistributedTest):
     world_size = 1
@@ -381,9 +415,7 @@ class TestModelTask(DistributedTest):
         if ("opt" in model) or ("bloom" in model):
             bs_output = pipe(query, **inf_kwargs)
 
-        # These performance tests are only measuring the time for a single
-        # inference request, we just want to check that performance isn't terrible
-        #assert ds_time <= (bs_time * 1.1)
+        _assert_performance_regression(bs_time, ds_time)
 
         assert assert_fn(bs_output, ds_output)
 
