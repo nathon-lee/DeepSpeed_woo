@@ -77,16 +77,12 @@ class HybridEngineRollout(RolloutEngine):
         is_greedy = sampling.temperature <= 0.0
 
         if self.use_graph_capture and is_greedy:
-            self.engine._profile_generation_phases = self.enable_profiling
-            try:
-                output_ids = self._generate_graph(prompt_ids,
-                                                  prompt_attn,
-                                                  max_new_tokens,
-                                                  pad_token_id,
-                                                  module,
-                                                  device)
-            finally:
-                self.engine._profile_generation_phases = False
+            output_ids = self._generate_graph(prompt_ids,
+                                              prompt_attn,
+                                              max_new_tokens,
+                                              pad_token_id,
+                                              module,
+                                              device)
         else:
             temperature = max(sampling.temperature, 1e-8)
             do_sample = not is_greedy
@@ -185,6 +181,11 @@ class HybridEngineRollout(RolloutEngine):
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
+        accelerator = get_accelerator()
+        if self.enable_profiling:
+            accelerator.synchronize()
+            model_generation_start = time.perf_counter()
+
         batch_size = prompt_ids.shape[0]
         prompt_len = prompt_ids.shape[1]
         max_len = prompt_len + max_new_tokens
@@ -201,6 +202,9 @@ class HybridEngineRollout(RolloutEngine):
         )
         prefill_attn = torch.ones(batch_size, prompt_len, dtype=torch.long, device=device)
         prefill_attn[:, :prompt_len] = prompt_attn
+        if self.enable_profiling:
+            accelerator.synchronize()
+            prefill_start = time.perf_counter()
         prefill_out = module(
             prompt_ids,
             attention_mask=prefill_attn,
@@ -208,6 +212,9 @@ class HybridEngineRollout(RolloutEngine):
             use_cache=True,
             cache_position=torch.arange(prompt_len, device=device),
         )
+        if self.enable_profiling:
+            accelerator.synchronize()
+            self.engine._prefill_latency = time.perf_counter() - prefill_start
         next_token = prefill_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
 
         # --- Copy prefill KV into DeepSpeedStaticCache ---
@@ -283,6 +290,9 @@ class HybridEngineRollout(RolloutEngine):
 
         # --- Decode loop ---
         eos_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        if self.enable_profiling:
+            accelerator.synchronize()
+            decode_start = time.perf_counter()
         for step in range(max_new_tokens - 1):
             if eos_mask.all():
                 output_ids.append(torch.full((batch_size, 1), pad_token_id, dtype=torch.long, device=device))
@@ -302,6 +312,10 @@ class HybridEngineRollout(RolloutEngine):
             output_ids.append(next_token)
             eos_mask |= (next_token.squeeze(1) == eos_token_id)
 
+        if self.enable_profiling:
+            accelerator.synchronize()
+            self.engine._decode_latency = time.perf_counter() - decode_start
+            self.engine._model_generation_latency = time.perf_counter() - model_generation_start
         return torch.cat(output_ids, dim=1)
 
     @staticmethod

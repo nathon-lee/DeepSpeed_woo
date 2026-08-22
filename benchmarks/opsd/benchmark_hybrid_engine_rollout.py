@@ -69,6 +69,8 @@ def _validate_args(args):
         raise ValueError("temperature must be non-negative")
     if not 0.0 < args.top_p <= 1.0:
         raise ValueError("top-p must be in the interval (0, 1]")
+    if args.use_graph_capture and args.temperature > 0.0:
+        raise ValueError("CUDA graph capture currently supports greedy decoding only")
 
 
 def _load_model_and_tokenizer(model_name, dtype, device):
@@ -164,7 +166,11 @@ def _run(args):
     try:
         model, tokenizer = _load_model_and_tokenizer(args.model, dtype, device)
         engine = _build_engine(model, args)
-        rollout = HybridEngineRollout(engine, tokenizer, HybridEngineRolloutConfig(enable_profiling=True))
+        rollout_config = HybridEngineRolloutConfig(
+            use_graph_capture=args.use_graph_capture,
+            enable_profiling=True,
+        )
+        rollout = HybridEngineRollout(engine, tokenizer, rollout_config)
 
         cases = []
         matrix = itertools.product(args.batch_sizes, args.samples_per_prompt, args.prompt_lengths,
@@ -182,6 +188,7 @@ def _run(args):
             "iterations": args.iterations,
             "temperature": args.temperature,
             "top_p": args.top_p,
+            "use_graph_capture": args.use_graph_capture,
             "release_inference_cache": args.release_inference_cache,
             "cases": cases,
         }
@@ -195,7 +202,7 @@ def _run(args):
             dist.destroy_process_group()
 
 
-def main():
+def _parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Benchmark HybridEngine rollout stage profiling")
     parser.add_argument("--model", default="facebook/opt-6.7b", help="HuggingFace model ID or local model path")
     parser.add_argument("--dtype", choices=["fp16", "bf16"], default="fp16")
@@ -208,9 +215,14 @@ def main():
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--release-inference-cache", action="store_true")
+    parser.add_argument("--use-graph-capture", action="store_true", help="Use CUDA graph capture for greedy decode")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--output", default="opsd_rollout_profile.json")
-    _run(parser.parse_args())
+    return parser.parse_args(argv)
+
+
+def main():
+    _run(_parse_args())
 
 
 if __name__ == "__main__":

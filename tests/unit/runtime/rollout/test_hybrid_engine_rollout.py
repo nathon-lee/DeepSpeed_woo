@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from benchmarks.opsd.benchmark_hybrid_engine_rollout import _summarize
+from benchmarks.opsd.benchmark_hybrid_engine_rollout import _parse_args, _summarize
 from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import (
@@ -202,6 +202,12 @@ def test_benchmark_summarizes_profile_samples():
 
     assert summary["generation_ms"] == {"mean": 21, "p50": 21.0, "p95": 38}
     assert summary["tokens_per_second"] == {"mean": 105, "p50": 105.0, "p95": 190}
+
+
+def test_benchmark_parses_graph_capture_flag():
+    args = _parse_args(["--use-graph-capture"])
+
+    assert args.use_graph_capture is True
 
 
 # -- _sample_top_p ------------------------------------------------------
