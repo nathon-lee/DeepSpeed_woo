@@ -136,10 +136,24 @@ class HybridEngineRollout(RolloutEngine):
             for source_name, profile_name in (
                     ("_cache_retake_latency", "cache_retake_ms"),
                     ("_model_generation_latency", "model_generation_ms"),
-                    ("_cache_release_latency", "cache_release_ms")):
+                    ("_cache_release_latency", "cache_release_ms"),
+                    ("_workspace_release_latency", "workspace_release_ms"),
+                    ("_gc_collect_latency", "gc_collect_ms"),
+                    ("_empty_cache_latency", "empty_cache_ms")):
                 value = getattr(self.engine, source_name, None)
                 if isinstance(value, Real):
                     self._last_profile[profile_name] = value * 1000.0
+            memory_before = getattr(self.engine, "_memory_before_release", (0, 0))
+            memory_after = getattr(self.engine, "_memory_after_release", (0, 0))
+            if (isinstance(memory_before, tuple) and isinstance(memory_after, tuple)
+                    and all(isinstance(value, Real) for value in (*memory_before, *memory_after))
+                    and (memory_before != (0, 0) or memory_after != (0, 0))):
+                self._last_profile.update({
+                    "memory_allocated_before_release_mb": memory_before[0] / (1024**2),
+                    "memory_reserved_before_release_mb": memory_before[1] / (1024**2),
+                    "memory_allocated_after_release_mb": memory_after[0] / (1024**2),
+                    "memory_reserved_after_release_mb": memory_after[1] / (1024**2),
+                })
 
         return rollout_batch
 

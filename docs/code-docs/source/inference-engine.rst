@@ -40,6 +40,9 @@ When the underlying engine exposes HybridEngine cache instrumentation, the
 profile also includes ``cache_retake_ms``, ``model_generation_ms``, and
 ``cache_release_ms``. These values isolate workspace acquisition, model
 generation, and cache release from the rollout-level timings.
+For released caches, ``workspace_release_ms``, ``gc_collect_ms``, and
+``empty_cache_ms`` further break down cache cleanup. The profile also records
+allocated and reserved memory immediately before and after cache release.
 ``num_generated_tokens`` counts all returned response positions across the
 expanded batch, including padding positions. ``tokens_per_second`` divides
 that count by the end-to-end rollout time. The profile also records the input

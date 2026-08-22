@@ -59,6 +59,11 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
         self._model_generation_latency = 0
         self._cache_retake_latency = 0
         self._cache_release_latency = 0
+        self._workspace_release_latency = 0
+        self._gc_collect_latency = 0
+        self._empty_cache_latency = 0
+        self._memory_before_release = (0, 0)
+        self._memory_after_release = (0, 0)
         self._training_latency = 0
         self._total_batch_size = None
         self._gather_latency = 0
@@ -292,13 +297,30 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                 self.is_lora_fused = False
 
         if self._config.hybrid_engine.release_inference_cache:
+            accelerator = get_accelerator()
+            self._memory_before_release = (accelerator.memory_allocated(), accelerator.memory_reserved())
+
             release_start = time.perf_counter()
             self.workspace.release_workspace()
+            self._workspace_release_latency = time.perf_counter() - release_start
+
+            gc_start = time.perf_counter()
             gc.collect()
-            get_accelerator().empty_cache()
+            self._gc_collect_latency = time.perf_counter() - gc_start
+
+            empty_cache_start = time.perf_counter()
+            accelerator.empty_cache()
+            self._empty_cache_latency = time.perf_counter() - empty_cache_start
+
             self._cache_release_latency = time.perf_counter() - release_start
+            self._memory_after_release = (accelerator.memory_allocated(), accelerator.memory_reserved())
         else:
             self._cache_release_latency = 0
+            self._workspace_release_latency = 0
+            self._gc_collect_latency = 0
+            self._empty_cache_latency = 0
+            self._memory_before_release = (0, 0)
+            self._memory_after_release = (0, 0)
 
         self._generate_latency = time.time() - self._t0 - self._gather_latency
 

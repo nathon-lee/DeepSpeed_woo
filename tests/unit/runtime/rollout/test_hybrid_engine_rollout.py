@@ -90,6 +90,11 @@ def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_c
     rollout.engine._cache_retake_latency = 0.0002
     rollout.engine._model_generation_latency = 0.0105
     rollout.engine._cache_release_latency = 0.0003
+    rollout.engine._workspace_release_latency = 0.0001
+    rollout.engine._gc_collect_latency = 0.00015
+    rollout.engine._empty_cache_latency = 0.00005
+    rollout.engine._memory_before_release = (4 * 1024**2, 8 * 1024**2)
+    rollout.engine._memory_after_release = (2 * 1024**2, 3 * 1024**2)
     mock_perf_counter.side_effect = [1.0, 1.001, 1.011, 1.013]
 
     output = rollout.generate(_make_request(), _make_sampling(n_samples_per_prompt=2))
@@ -108,6 +113,11 @@ def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_c
     assert profile["cache_retake_ms"] == pytest.approx(0.2)
     assert profile["model_generation_ms"] == pytest.approx(10.5)
     assert profile["cache_release_ms"] == pytest.approx(0.3)
+    assert profile["workspace_release_ms"] == pytest.approx(0.1)
+    assert profile["gc_collect_ms"] == pytest.approx(0.15)
+    assert profile["empty_cache_ms"] == pytest.approx(0.05)
+    assert profile["memory_allocated_before_release_mb"] == pytest.approx(4.0)
+    assert profile["memory_reserved_after_release_mb"] == pytest.approx(3.0)
     expected_prompt_masks = [[0, 1, 1], [0, 1, 1], [0, 1, 1], [0, 1, 1]]
     assert output.attention_mask[:, :3].tolist() == expected_prompt_masks
     assert mock_get_accelerator.return_value.synchronize.call_count == 4
