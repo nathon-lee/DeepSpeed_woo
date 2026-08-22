@@ -34,6 +34,7 @@ from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout,
 
 _TIMING_FIELDS = ("prompt_expansion_ms", "generation_ms", "post_processing_ms", "total_ms",
                   "tokens_per_second")
+_OPTIONAL_TIMING_FIELDS = ("cache_retake_ms", "model_generation_ms", "cache_release_ms")
 
 
 def _percentile(values, percentile):
@@ -44,7 +45,8 @@ def _percentile(values, percentile):
 
 def _summarize(profiles):
     summary = {}
-    for field in _TIMING_FIELDS:
+    fields = _TIMING_FIELDS + tuple(field for field in _OPTIONAL_TIMING_FIELDS if field in profiles[0])
+    for field in fields:
         values = [profile[field] for profile in profiles]
         summary[field] = {
             "mean": statistics.mean(values),

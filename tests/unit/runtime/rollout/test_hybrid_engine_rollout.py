@@ -87,6 +87,9 @@ def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_c
         [0, 3, 4, 9, 10],
         [0, 3, 4, 11, 12],
     ])
+    rollout.engine.module._cache_retake_latency = 0.0002
+    rollout.engine.module._model_generation_latency = 0.0105
+    rollout.engine.module._cache_release_latency = 0.0003
     mock_perf_counter.side_effect = [1.0, 1.001, 1.011, 1.013]
 
     output = rollout.generate(_make_request(), _make_sampling(n_samples_per_prompt=2))
@@ -102,6 +105,9 @@ def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_c
     assert profile["num_samples_per_prompt"] == 2
     assert profile["prompt_length"] == 3
     assert profile["response_length"] == 2
+    assert profile["cache_retake_ms"] == pytest.approx(0.2)
+    assert profile["model_generation_ms"] == pytest.approx(10.5)
+    assert profile["cache_release_ms"] == pytest.approx(0.3)
     expected_prompt_masks = [[0, 1, 1], [0, 1, 1], [0, 1, 1], [0, 1, 1]]
     assert output.attention_mask[:, :3].tolist() == expected_prompt_masks
     assert mock_get_accelerator.return_value.synchronize.call_count == 4

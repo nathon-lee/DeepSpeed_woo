@@ -14,6 +14,7 @@ Two generation paths:
 
 import time
 from dataclasses import dataclass
+from numbers import Real
 
 import torch
 
@@ -132,6 +133,13 @@ class HybridEngineRollout(RolloutEngine):
                 "prompt_length": prompt_len,
                 "response_length": response_length,
             }
+            for source_name, profile_name in (
+                    ("_cache_retake_latency", "cache_retake_ms"),
+                    ("_model_generation_latency", "model_generation_ms"),
+                    ("_cache_release_latency", "cache_release_ms")):
+                value = getattr(module, source_name, None)
+                if isinstance(value, Real):
+                    self._last_profile[profile_name] = value * 1000.0
 
         return rollout_batch
 

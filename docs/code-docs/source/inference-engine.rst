@@ -36,6 +36,10 @@ behavior and adds overhead. Enable it through ``HybridEngineRolloutConfig``::
 
 The profile contains synchronized times for prompt expansion, generation,
 post-processing, and the complete rollout. Times are reported in milliseconds.
+When the underlying engine exposes HybridEngine cache instrumentation, the
+profile also includes ``cache_retake_ms``, ``model_generation_ms``, and
+``cache_release_ms``. These values isolate workspace acquisition, model
+generation, and cache release from the rollout-level timings.
 ``num_generated_tokens`` counts all returned response positions across the
 expanded batch, including padding positions. ``tokens_per_second`` divides
 that count by the end-to-end rollout time. The profile also records the input

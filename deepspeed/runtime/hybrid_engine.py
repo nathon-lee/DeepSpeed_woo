@@ -56,6 +56,9 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
         self._iters = 0
         self._training_start_time = None
         self._generate_latency = 0
+        self._model_generation_latency = 0
+        self._cache_retake_latency = 0
+        self._cache_release_latency = 0
         self._training_latency = 0
         self._total_batch_size = None
         self._gather_latency = 0
@@ -177,6 +180,17 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                 if not retake_success:
                     raise RuntimeError("Unable to retake inference workspace.")
 
+    def _retake_inference_cache_profiled(self):
+        start = time.perf_counter()
+        self.retake_inference_cache()
+        self._cache_retake_latency = time.perf_counter() - start
+
+    def _generate_profiled(self, *inputs, **kwargs):
+        start = time.perf_counter()
+        result = self._generate(*inputs, **kwargs)
+        self._model_generation_latency = time.perf_counter() - start
+        return result
+
     def generate(self, *inputs, **kwargs):
         if self._total_batch_size is None:
             bsz = inputs[0].shape[0] if len(inputs) > 0 else \
@@ -236,11 +250,11 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                 else:
                     kwargs['input_ids'] = output
 
-                self.retake_inference_cache()
+                self._retake_inference_cache_profiled()
 
                 non_active_params = get_inactive_params(non_tp_params)
                 with GatheredParameters(non_active_params):
-                    generate_ret_vals = self._generate(*inputs, **kwargs)
+                    generate_ret_vals = self._generate_profiled(*inputs, **kwargs)
 
                 for layer_id in range(len(self.layer_params)):
                     self._inference_containers[layer_id].release_memory()
@@ -258,8 +272,8 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                     if len(self.all_lora_params) > 0:
                         self.fuse_lora_weight()
 
-                    self.retake_inference_cache()
-                    generate_ret_vals = self._generate(*inputs, **kwargs)
+                    self._retake_inference_cache_profiled()
+                    generate_ret_vals = self._generate_profiled(*inputs, **kwargs)
 
                     if len(self.all_lora_params) > 0:
                         self.unfuse_lora_weight()
@@ -267,8 +281,8 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
             if len(self.all_lora_params) > 0 and (not self.Z3_enabled):
                 self.fuse_lora_weight()
 
-            self.retake_inference_cache()
-            generate_ret_vals = self._generate(*inputs, **kwargs)
+            self._retake_inference_cache_profiled()
+            generate_ret_vals = self._generate_profiled(*inputs, **kwargs)
 
             if len(self.all_lora_params) > 0:
                 if (not self.Z3_enabled):
@@ -278,9 +292,13 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                 self.is_lora_fused = False
 
         if self._config.hybrid_engine.release_inference_cache:
+            release_start = time.perf_counter()
             self.workspace.release_workspace()
             gc.collect()
             get_accelerator().empty_cache()
+            self._cache_release_latency = time.perf_counter() - release_start
+        else:
+            self._cache_release_latency = 0
 
         self._generate_latency = time.time() - self._t0 - self._gather_latency
 
