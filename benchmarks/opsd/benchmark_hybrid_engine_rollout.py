@@ -102,6 +102,7 @@ def _build_engine(model, args):
             "enabled": True,
             "max_out_tokens": max(args.prompt_lengths) + max(args.response_lengths),
             "release_inference_cache": args.release_inference_cache,
+            "enable_cuda_graph": args.use_graph_capture,
         },
     }
     engine, _, _, _ = deepspeed.initialize(model=model, config=ds_config)
@@ -138,12 +139,15 @@ def _run_case(rollout, model, args, batch_size, samples_per_prompt, prompt_lengt
         rollout.generate(request, sampling)
         profiles.append(dict(rollout.get_last_profile()))
 
+    decode_graphs = getattr(rollout.engine, "_decode_graphs", None)
+    captured_positions = decode_graphs.captured_positions if decode_graphs is not None else 0
     return {
         "batch_size": batch_size,
         "samples_per_prompt": samples_per_prompt,
         "prompt_length": prompt_length,
         "requested_response_length": response_length,
         "returned_response_length": profiles[-1]["response_length"],
+        "cuda_graph_captured_positions": captured_positions,
         "peak_memory_mb": accelerator.max_memory_allocated() / (1024**2),
         "summary": _summarize(profiles),
         "profiles": profiles,

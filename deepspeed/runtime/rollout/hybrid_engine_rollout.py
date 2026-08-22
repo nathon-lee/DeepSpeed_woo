@@ -3,13 +3,9 @@
 # DeepSpeed Team
 """Rollout engine backed by DeepSpeed's hybrid engine.
 
-Two generation paths:
-  1. **model.generate()** (default): delegates to HuggingFace generate.
-     Supports sampling (temperature, top_p) and greedy.
-  2. **graph capture + DeepSpeedStaticCache**: only for greedy (temperature=0).
-     Pre-allocates a StaticCache, captures the decode forward pass with a
-     CUDA graph, and replays it for each decode step.  Eliminates kernel
-     launch overhead.
+Generation delegates to HuggingFace ``generate``. When graph capture is
+enabled, the response length is pinned so HybridEngine can safely replay its
+native per-position decode graphs.
 """
 
 import time
@@ -47,7 +43,6 @@ class HybridEngineRollout(RolloutEngine):
 
     @torch.no_grad()
     def generate(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
-        device = request.prompt_ids.device
         B = request.prompt_ids.shape[0]
         n = sampling.n_samples_per_prompt
         total = B * n
@@ -76,29 +71,23 @@ class HybridEngineRollout(RolloutEngine):
 
         is_greedy = sampling.temperature <= 0.0
 
-        if self.use_graph_capture and is_greedy:
-            output_ids = self._generate_graph(prompt_ids,
-                                              prompt_attn,
-                                              max_new_tokens,
-                                              pad_token_id,
-                                              module,
-                                              device)
-        else:
-            temperature = max(sampling.temperature, 1e-8)
-            do_sample = not is_greedy
-            self.engine._profile_generation_phases = self.enable_profiling
-            try:
-                output_ids = module.generate(
-                    prompt_ids,
-                    attention_mask=prompt_attn,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=do_sample,
-                    temperature=temperature if do_sample else 1.0,
-                    top_p=sampling.top_p if do_sample else 1.0,
-                    pad_token_id=pad_token_id,
-                )
-            finally:
-                self.engine._profile_generation_phases = False
+        temperature = max(sampling.temperature, 1e-8)
+        do_sample = not is_greedy
+        generation_kwargs = {
+            "attention_mask": prompt_attn,
+            "max_new_tokens": max_new_tokens,
+            "do_sample": do_sample,
+            "temperature": temperature if do_sample else 1.0,
+            "top_p": sampling.top_p if do_sample else 1.0,
+            "pad_token_id": pad_token_id,
+        }
+        if self.use_graph_capture:
+            generation_kwargs["min_new_tokens"] = max_new_tokens
+        self.engine._profile_generation_phases = self.enable_profiling
+        try:
+            output_ids = module.generate(prompt_ids, **generation_kwargs)
+        finally:
+            self.engine._profile_generation_phases = False
 
         if self.enable_profiling:
             accelerator.synchronize()
@@ -171,152 +160,6 @@ class HybridEngineRollout(RolloutEngine):
     def get_last_profile(self):
         """Return the most recent profiling snapshot for this rollout instance."""
         return self._last_profile
-
-    # ------------------------------------------------------------------
-    # Graph capture decode loop (greedy only)
-    # ------------------------------------------------------------------
-
-    def _generate_graph(self, prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module, device):
-        """Greedy decode with DeepSpeedStaticCache + CUDA graph capture."""
-        from transformers import StaticCache
-        from deepspeed.utils.static_cache import DeepSpeedStaticCache
-
-        accelerator = get_accelerator()
-        if self.enable_profiling:
-            accelerator.synchronize()
-            model_generation_start = time.perf_counter()
-
-        batch_size = prompt_ids.shape[0]
-        prompt_len = prompt_ids.shape[1]
-        max_len = prompt_len + max_new_tokens
-        eos_token_id = self.tokenizer.eos_token_id
-        model_dtype = next(module.parameters()).dtype
-
-        # --- Prefill with HF StaticCache (correct attention semantics) ---
-        prefill_cache = StaticCache(
-            config=module.config,
-            batch_size=batch_size,
-            max_cache_len=max_len,
-            device=device,
-            dtype=model_dtype,
-        )
-        prefill_attn = torch.ones(batch_size, prompt_len, dtype=torch.long, device=device)
-        prefill_attn[:, :prompt_len] = prompt_attn
-        if self.enable_profiling:
-            accelerator.synchronize()
-            prefill_start = time.perf_counter()
-        prefill_out = module(
-            prompt_ids,
-            attention_mask=prefill_attn,
-            past_key_values=prefill_cache,
-            use_cache=True,
-            cache_position=torch.arange(prompt_len, device=device),
-        )
-        if self.enable_profiling:
-            accelerator.synchronize()
-            self.engine._prefill_latency = time.perf_counter() - prefill_start
-        next_token = prefill_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-
-        # --- Copy prefill KV into DeepSpeedStaticCache ---
-        write_pos = torch.tensor(prompt_len - 1, dtype=torch.long, device=device)
-        ds_cache = DeepSpeedStaticCache(
-            module.config,
-            batch_size=batch_size,
-            max_cache_len=max_len,
-            device=device,
-            dtype=model_dtype,
-        )
-        ds_cache.set_write_position(write_pos)
-        # Trigger lazy init then copy real data
-        for layer_idx in range(len(ds_cache.layers)):
-            ds_layer = ds_cache.layers[layer_idx]
-            hf_layer = prefill_cache.layers[layer_idx]
-            if not ds_layer.is_initialized:
-                ds_layer.lazy_initialization(hf_layer.keys, hf_layer.values)
-            ds_layer.keys[:, :, :prompt_len, :].copy_(hf_layer.keys[:, :, :prompt_len, :])
-            ds_layer.values[:, :, :prompt_len, :].copy_(hf_layer.values[:, :, :prompt_len, :])
-
-        output_ids = [prompt_ids, next_token]
-
-        # --- Static buffers for graph capture ---
-        static_token = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
-        static_attn = torch.zeros(batch_size, max_len, dtype=torch.long, device=device)
-        static_attn[:, :prompt_len] = prompt_attn
-        static_attn[:, prompt_len] = 1  # first decode position
-        static_pos = torch.tensor(prompt_len, dtype=torch.long, device=device)
-        static_cache_pos = static_pos.unsqueeze(0)  # [1] for cache_position
-        static_pos_ids = static_pos.reshape(1, 1).expand(batch_size, 1)  # [batch, 1]
-
-        write_pos.fill_(prompt_len)
-
-        # Remove forward hooks (they synchronize — illegal during graph capture)
-        saved_pre = dict(module._forward_pre_hooks)
-        saved_post = dict(module._forward_hooks)
-        module._forward_pre_hooks.clear()
-        module._forward_hooks.clear()
-
-        try:
-            # Warmup on side stream
-            static_token.copy_(next_token)
-            s = get_accelerator().Stream()
-            s.wait_stream(get_accelerator().current_stream())
-            with get_accelerator().stream(s):
-                for _ in range(3):
-                    out = module(
-                        static_token,
-                        attention_mask=static_attn,
-                        past_key_values=ds_cache,
-                        use_cache=True,
-                        cache_position=static_cache_pos,
-                        position_ids=static_pos_ids,
-                    )
-            get_accelerator().current_stream().wait_stream(s)
-
-            # Capture
-            graph = get_accelerator().create_graph()
-            with get_accelerator().capture_to_graph(graph):
-                out = module(
-                    static_token,
-                    attention_mask=static_attn,
-                    past_key_values=ds_cache,
-                    use_cache=True,
-                    cache_position=static_cache_pos,
-                    position_ids=static_pos_ids,
-                )
-            static_logits = out.logits
-        finally:
-            module._forward_pre_hooks.update(saved_pre)
-            module._forward_hooks.update(saved_post)
-
-        # --- Decode loop ---
-        eos_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
-        if self.enable_profiling:
-            accelerator.synchronize()
-            decode_start = time.perf_counter()
-        for step in range(max_new_tokens - 1):
-            if eos_mask.all():
-                output_ids.append(torch.full((batch_size, 1), pad_token_id, dtype=torch.long, device=device))
-                continue
-
-            # Update static inputs
-            static_token.copy_(next_token)
-            pos = prompt_len + step
-            write_pos.fill_(pos)
-            static_cache_pos.fill_(pos)
-            static_pos_ids.fill_(pos)
-            static_attn[:, pos] = 1
-
-            # Replay
-            get_accelerator().replay_graph(graph)
-            next_token = static_logits[:, -1, :].argmax(dim=-1, keepdim=True)
-            output_ids.append(next_token)
-            eos_mask |= (next_token.squeeze(1) == eos_token_id)
-
-        if self.enable_profiling:
-            accelerator.synchronize()
-            self.engine._decode_latency = time.perf_counter() - decode_start
-            self.engine._model_generation_latency = time.perf_counter() - model_generation_start
-        return torch.cat(output_ids, dim=1)
 
     @staticmethod
     def _sample_top_p(logits: torch.Tensor, temperature: float = 1.0, top_p: float = 1.0) -> torch.Tensor:

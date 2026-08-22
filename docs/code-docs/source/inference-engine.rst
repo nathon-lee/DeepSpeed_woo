@@ -51,4 +51,6 @@ expanded batch, including padding positions. ``tokens_per_second`` divides
 that count by the end-to-end rollout time. The profile also records the input
 batch size, samples per prompt, prompt length, and returned response length.
 The OPSD benchmark accepts ``--use-graph-capture`` to compare greedy decode
-against its default HuggingFace generation path.
+against its default HuggingFace generation path. Each benchmark case records
+``cuda_graph_captured_positions`` so a capture failure and eager fallback are
+visible in the output.

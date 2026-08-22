@@ -249,12 +249,12 @@ def test_sync_weights_is_noop():
 # -- generate dispatches correctly -------------------------------------
 
 
-def test_generate_calls_graph_capture_when_enabled():
+def test_generate_pins_response_length_for_graph_capture():
     engine = _make_engine()
     tok = _make_tokenizer()
     cfg = HybridEngineRolloutConfig(use_graph_capture=True)
     rollout = HybridEngineRollout(engine, tok, cfg=cfg)
-    rollout._generate_graph = MagicMock(return_value=torch.zeros(1, 5, dtype=torch.long))
+    engine.module.generate.return_value = torch.zeros(1, 5, dtype=torch.long)
 
     req = MagicMock()
     req.prompt_ids = torch.tensor([[1, 2]])
@@ -265,4 +265,4 @@ def test_generate_calls_graph_capture_when_enabled():
     sampling.max_new_tokens = 3
 
     rollout.generate(req, sampling)
-    rollout._generate_graph.assert_called_once()
+    assert engine.module.generate.call_args.kwargs["min_new_tokens"] == 3
