@@ -87,9 +87,9 @@ def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_c
         [0, 3, 4, 9, 10],
         [0, 3, 4, 11, 12],
     ])
-    rollout.engine.module._cache_retake_latency = 0.0002
-    rollout.engine.module._model_generation_latency = 0.0105
-    rollout.engine.module._cache_release_latency = 0.0003
+    rollout.engine._cache_retake_latency = 0.0002
+    rollout.engine._model_generation_latency = 0.0105
+    rollout.engine._cache_release_latency = 0.0003
     mock_perf_counter.side_effect = [1.0, 1.001, 1.011, 1.013]
 
     output = rollout.generate(_make_request(), _make_sampling(n_samples_per_prompt=2))

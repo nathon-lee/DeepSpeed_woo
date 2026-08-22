@@ -137,7 +137,7 @@ class HybridEngineRollout(RolloutEngine):
                     ("_cache_retake_latency", "cache_retake_ms"),
                     ("_model_generation_latency", "model_generation_ms"),
                     ("_cache_release_latency", "cache_release_ms")):
-                value = getattr(module, source_name, None)
+                value = getattr(self.engine, source_name, None)
                 if isinstance(value, Real):
                     self._last_profile[profile_name] = value * 1000.0
 
