@@ -40,6 +40,9 @@ When the underlying engine exposes HybridEngine cache instrumentation, the
 profile also includes ``cache_retake_ms``, ``model_generation_ms``, and
 ``cache_release_ms``. These values isolate workspace acquisition, model
 generation, and cache release from the rollout-level timings.
+When phase profiling is enabled, ``prefill_ms`` and ``decode_ms`` split
+``model_generation_ms`` into the initial prompt forward and subsequent token
+forwards.
 For released caches, ``workspace_release_ms``, ``gc_collect_ms``, and
 ``empty_cache_ms`` further break down cache cleanup. The profile also records
 allocated and reserved memory immediately before and after cache release.

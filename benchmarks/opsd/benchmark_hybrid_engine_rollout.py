@@ -34,7 +34,8 @@ from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout,
 
 _TIMING_FIELDS = ("prompt_expansion_ms", "generation_ms", "post_processing_ms", "total_ms",
                   "tokens_per_second")
-_OPTIONAL_TIMING_FIELDS = ("cache_retake_ms", "model_generation_ms", "cache_release_ms", "workspace_release_ms",
+_OPTIONAL_TIMING_FIELDS = ("cache_retake_ms", "model_generation_ms", "prefill_ms", "decode_ms", "cache_release_ms",
+                           "workspace_release_ms",
                            "gc_collect_ms", "empty_cache_ms", "memory_allocated_before_release_mb",
                            "memory_reserved_before_release_mb", "memory_allocated_after_release_mb",
                            "memory_reserved_after_release_mb")

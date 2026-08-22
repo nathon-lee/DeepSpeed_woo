@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from benchmarks.opsd.benchmark_hybrid_engine_rollout import _summarize
+from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import (
     HybridEngineRollout,
@@ -89,6 +90,8 @@ def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_c
     ])
     rollout.engine._cache_retake_latency = 0.0002
     rollout.engine._model_generation_latency = 0.0105
+    rollout.engine._prefill_latency = 0.0035
+    rollout.engine._decode_latency = 0.007
     rollout.engine._cache_release_latency = 0.0003
     rollout.engine._workspace_release_latency = 0.0001
     rollout.engine._gc_collect_latency = 0.00015
@@ -112,6 +115,8 @@ def test_generate_records_profile_when_enabled(mock_get_accelerator, mock_perf_c
     assert profile["response_length"] == 2
     assert profile["cache_retake_ms"] == pytest.approx(0.2)
     assert profile["model_generation_ms"] == pytest.approx(10.5)
+    assert profile["prefill_ms"] == pytest.approx(3.5)
+    assert profile["decode_ms"] == pytest.approx(7.0)
     assert profile["cache_release_ms"] == pytest.approx(0.3)
     assert profile["workspace_release_ms"] == pytest.approx(0.1)
     assert profile["gc_collect_ms"] == pytest.approx(0.15)
@@ -133,6 +138,31 @@ def test_generate_does_not_profile_when_disabled(mock_get_accelerator):
 
     assert rollout.get_last_profile() is None
     mock_get_accelerator.assert_not_called()
+
+
+@patch("deepspeed.runtime.hybrid_engine.time.perf_counter")
+@patch("deepspeed.runtime.hybrid_engine.get_accelerator")
+def test_generation_phase_hooks_measure_prefill_and_decode(mock_get_accelerator, mock_perf_counter):
+    engine = DeepSpeedHybridEngine.__new__(DeepSpeedHybridEngine)
+    torch.nn.Module.__init__(engine)
+    engine.module = torch.nn.Identity()
+
+    def generate(input_ids):
+        engine.module(input_ids)
+        engine.module(input_ids[:, :1])
+        return input_ids
+
+    engine._generate = generate
+    mock_perf_counter.side_effect = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    input_ids = torch.tensor([[1, 2, 3]])
+
+    output = engine._generate_with_phase_profile(input_ids)
+
+    assert torch.equal(output, input_ids)
+    assert engine._prefill_latency == pytest.approx(1.0)
+    assert engine._decode_latency == pytest.approx(1.0)
+    assert engine._model_generation_latency == pytest.approx(5.0)
+    assert mock_get_accelerator.return_value.synchronize.call_count == 4
 
 
 def test_profiling_does_not_change_rollout_output():

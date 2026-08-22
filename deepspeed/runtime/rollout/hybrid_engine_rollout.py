@@ -77,19 +77,32 @@ class HybridEngineRollout(RolloutEngine):
         is_greedy = sampling.temperature <= 0.0
 
         if self.use_graph_capture and is_greedy:
-            output_ids = self._generate_graph(prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module, device)
+            self.engine._profile_generation_phases = self.enable_profiling
+            try:
+                output_ids = self._generate_graph(prompt_ids,
+                                                  prompt_attn,
+                                                  max_new_tokens,
+                                                  pad_token_id,
+                                                  module,
+                                                  device)
+            finally:
+                self.engine._profile_generation_phases = False
         else:
             temperature = max(sampling.temperature, 1e-8)
             do_sample = not is_greedy
-            output_ids = module.generate(
-                prompt_ids,
-                attention_mask=prompt_attn,
-                max_new_tokens=max_new_tokens,
-                do_sample=do_sample,
-                temperature=temperature if do_sample else 1.0,
-                top_p=sampling.top_p if do_sample else 1.0,
-                pad_token_id=pad_token_id,
-            )
+            self.engine._profile_generation_phases = self.enable_profiling
+            try:
+                output_ids = module.generate(
+                    prompt_ids,
+                    attention_mask=prompt_attn,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=do_sample,
+                    temperature=temperature if do_sample else 1.0,
+                    top_p=sampling.top_p if do_sample else 1.0,
+                    pad_token_id=pad_token_id,
+                )
+            finally:
+                self.engine._profile_generation_phases = False
 
         if self.enable_profiling:
             accelerator.synchronize()
@@ -136,6 +149,8 @@ class HybridEngineRollout(RolloutEngine):
             for source_name, profile_name in (
                     ("_cache_retake_latency", "cache_retake_ms"),
                     ("_model_generation_latency", "model_generation_ms"),
+                    ("_prefill_latency", "prefill_ms"),
+                    ("_decode_latency", "decode_ms"),
                     ("_cache_release_latency", "cache_release_ms"),
                     ("_workspace_release_latency", "workspace_release_ms"),
                     ("_gc_collect_latency", "gc_collect_ms"),

@@ -57,6 +57,9 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
         self._training_start_time = None
         self._generate_latency = 0
         self._model_generation_latency = 0
+        self._prefill_latency = 0
+        self._decode_latency = 0
+        self._profile_generation_phases = False
         self._cache_retake_latency = 0
         self._cache_release_latency = 0
         self._workspace_release_latency = 0
@@ -191,9 +194,51 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
         self._cache_retake_latency = time.perf_counter() - start
 
     def _generate_profiled(self, *inputs, **kwargs):
+        if self._profile_generation_phases:
+            return self._generate_with_phase_profile(*inputs, **kwargs)
         start = time.perf_counter()
         result = self._generate(*inputs, **kwargs)
         self._model_generation_latency = time.perf_counter() - start
+        return result
+
+    def _generate_with_phase_profile(self, *inputs, **kwargs):
+        """Measure the first prompt forward separately from decode forwards."""
+        accelerator = get_accelerator()
+        self._prefill_latency = 0
+        self._decode_latency = 0
+        phase_totals = {"prefill": 0.0, "decode": 0.0}
+        saw_forward = False
+        active_phase = None
+        phase_start = 0.0
+
+        def forward_pre_hook(_module, hook_inputs, hook_kwargs):
+            nonlocal active_phase, phase_start, saw_forward
+            input_ids = hook_kwargs.get("input_ids")
+            if input_ids is None and hook_inputs:
+                input_ids = hook_inputs[0]
+            is_prefill = not saw_forward and input_ids is not None and input_ids.shape[1] > 1
+            active_phase = "prefill" if is_prefill else "decode"
+            saw_forward = True
+            accelerator.synchronize()
+            phase_start = time.perf_counter()
+
+        def forward_post_hook(_module, _hook_inputs, _hook_kwargs, _hook_output):
+            accelerator.synchronize()
+            phase_totals[active_phase] += time.perf_counter() - phase_start
+
+        # Hooks are scoped to this generation call so normal training and inference
+        # retain their existing execution path and overhead.
+        pre_handle = self.module.register_forward_pre_hook(forward_pre_hook, with_kwargs=True)
+        post_handle = self.module.register_forward_hook(forward_post_hook, with_kwargs=True)
+        try:
+            start = time.perf_counter()
+            result = self._generate(*inputs, **kwargs)
+            self._model_generation_latency = time.perf_counter() - start
+        finally:
+            pre_handle.remove()
+            post_handle.remove()
+        self._prefill_latency = phase_totals["prefill"]
+        self._decode_latency = phase_totals["decode"]
         return result
 
     def generate(self, *inputs, **kwargs):
