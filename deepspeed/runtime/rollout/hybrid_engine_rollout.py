@@ -42,7 +42,7 @@ class HybridEngineRollout(RolloutEngine):
         self.use_graph_capture = getattr(cfg, 'use_graph_capture', False) if cfg else False
         self.enable_profiling = getattr(cfg, 'enable_profiling', False) if cfg else False
         self.enable_generation_phase_profiling = getattr(cfg, 'enable_generation_phase_profiling',
-                                                          True) if cfg else True
+                                                         True) if cfg else True
         self.use_shared_prefill = getattr(cfg, 'use_shared_prefill', False) if cfg else False
         self._last_profile = None
 

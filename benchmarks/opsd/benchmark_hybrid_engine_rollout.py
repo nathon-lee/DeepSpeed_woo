@@ -32,14 +32,11 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import HybridEngineRollout, HybridEngineRolloutConfig
 
-
-_TIMING_FIELDS = ("prompt_expansion_ms", "generation_ms", "post_processing_ms", "total_ms",
-                  "tokens_per_second")
+_TIMING_FIELDS = ("prompt_expansion_ms", "generation_ms", "post_processing_ms", "total_ms", "tokens_per_second")
 _OPTIONAL_TIMING_FIELDS = ("cache_retake_ms", "model_generation_ms", "prefill_ms", "decode_ms", "cache_release_ms",
-                           "workspace_release_ms",
-                           "gc_collect_ms", "empty_cache_ms", "memory_allocated_before_release_mb",
-                           "memory_reserved_before_release_mb", "memory_allocated_after_release_mb",
-                           "memory_reserved_after_release_mb")
+                           "workspace_release_ms", "gc_collect_ms", "empty_cache_ms",
+                           "memory_allocated_before_release_mb", "memory_reserved_before_release_mb",
+                           "memory_allocated_after_release_mb", "memory_reserved_after_release_mb")
 
 
 def _percentile(values, percentile):
@@ -95,8 +92,9 @@ def _load_model_and_tokenizer(model_name, dtype, device):
 
 def _build_engine(model, args):
     use_bf16 = args.dtype == "bf16"
-    max_effective_batch_size = max(batch_size * samples_per_prompt for batch_size, samples_per_prompt in
-                                   itertools.product(args.batch_sizes, args.samples_per_prompt))
+    max_effective_batch_size = max(
+        batch_size * samples_per_prompt
+        for batch_size, samples_per_prompt in itertools.product(args.batch_sizes, args.samples_per_prompt))
     ds_config = {
         "train_batch_size": max_effective_batch_size,
         "train_micro_batch_size_per_gpu": max_effective_batch_size,
@@ -221,8 +219,7 @@ def _run(args):
     try:
         model, tokenizer = _load_model_and_tokenizer(args.model, dtype, device)
         engine = _build_engine(model, args)
-        enable_generation_phase_profiling = (args.enable_generation_phase_profiling
-                                             and not args.torch_profile_output)
+        enable_generation_phase_profiling = (args.enable_generation_phase_profiling and not args.torch_profile_output)
         rollout_config = HybridEngineRolloutConfig(
             use_graph_capture=args.use_graph_capture,
             enable_profiling=True,

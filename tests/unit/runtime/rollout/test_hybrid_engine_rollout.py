@@ -14,7 +14,7 @@ import pytest
 import torch
 
 from benchmarks.opsd.benchmark_hybrid_engine_rollout import (_ordered_case_specs, _parse_args, _profile_rollout,
-                                                              _summarize, _validate_args)
+                                                             _summarize, _validate_args)
 from deepspeed.ops.transformer.inference.op_binding.workspace import WorkspaceOp
 from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
@@ -305,6 +305,7 @@ def test_benchmark_initializes_workspace_with_largest_effective_batch():
 
 
 def test_shared_prefill_hooks_reduce_prompt_and_expand_output():
+
     class PromptModule(torch.nn.Module):
 
         def __init__(self):
@@ -336,6 +337,7 @@ def test_shared_prefill_hooks_reduce_prompt_and_expand_output():
 
 
 def test_generate_uses_shared_prefill_for_multiple_samples():
+
     class GenerateModule(torch.nn.Module):
 
         def __init__(self):
