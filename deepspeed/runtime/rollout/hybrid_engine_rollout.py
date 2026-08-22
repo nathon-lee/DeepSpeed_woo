@@ -43,6 +43,7 @@ class HybridEngineRollout(RolloutEngine):
 
     @torch.no_grad()
     def generate(self, request: RolloutRequest, sampling: SamplingConfig) -> RolloutBatch:
+        device = request.prompt_ids.device
         B = request.prompt_ids.shape[0]
         n = sampling.n_samples_per_prompt
         total = B * n
