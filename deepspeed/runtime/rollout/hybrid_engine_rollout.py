@@ -24,6 +24,7 @@ class HybridEngineRolloutConfig:
     use_graph_capture: bool = False
     enable_profiling: bool = False
     enable_generation_phase_profiling: bool = True
+    use_shared_prefill: bool = False
 
 
 class HybridEngineRollout(RolloutEngine):
@@ -42,6 +43,7 @@ class HybridEngineRollout(RolloutEngine):
         self.enable_profiling = getattr(cfg, 'enable_profiling', False) if cfg else False
         self.enable_generation_phase_profiling = getattr(cfg, 'enable_generation_phase_profiling',
                                                           True) if cfg else True
+        self.use_shared_prefill = getattr(cfg, 'use_shared_prefill', False) if cfg else False
         self._last_profile = None
 
     @torch.no_grad()
@@ -87,12 +89,18 @@ class HybridEngineRollout(RolloutEngine):
         }
         if self.use_graph_capture:
             generation_kwargs["min_new_tokens"] = max_new_tokens
+        shared_prefill_handles = []
+        if self.use_shared_prefill and n > 1:
+            self.engine.prepare_shared_prefill(B, n, prompt_len)
+            shared_prefill_handles = self._register_shared_prefill_hooks(module, B, n)
         profile_generation_phases = self.enable_profiling and self.enable_generation_phase_profiling
         self.engine._profile_generation_phases = profile_generation_phases
         try:
             output_ids = module.generate(prompt_ids, **generation_kwargs)
         finally:
             self.engine._profile_generation_phases = False
+            for handle in shared_prefill_handles:
+                handle.remove()
 
         if self.enable_profiling:
             accelerator.synchronize()
@@ -170,6 +178,43 @@ class HybridEngineRollout(RolloutEngine):
     def get_last_profile(self):
         """Return the most recent profiling snapshot for this rollout instance."""
         return self._last_profile
+
+    def _register_shared_prefill_hooks(self, module, batch_size, repeats):
+        state = {"pending": True, "reduced": False}
+
+        def reduce_prompt_batch(_module, args, kwargs):
+            input_ids = kwargs.get("input_ids")
+            if not state["pending"]:
+                return args, kwargs
+            if input_ids is None:
+                raise RuntimeError("Shared prefill requires input_ids as a keyword argument")
+            expected_batch_size = batch_size * repeats
+            if input_ids.shape[0] != expected_batch_size:
+                raise RuntimeError("Shared prefill input batch does not match the expanded rollout batch")
+            if input_ids.shape[1] <= 1:
+                raise RuntimeError("Shared prefill requires a prompt with more than one token")
+            kwargs = dict(kwargs)
+            kwargs["input_ids"] = input_ids[::repeats]
+            for name in ("attention_mask", "position_ids", "token_type_ids"):
+                value = kwargs.get(name)
+                if isinstance(value, torch.Tensor) and value.shape[0] == expected_batch_size:
+                    kwargs[name] = value[::repeats]
+            state["reduced"] = True
+            return args, kwargs
+
+        def expand_prompt_output(_module, _args, _kwargs, output):
+            if not state["pending"]:
+                return output
+            if not state["reduced"]:
+                raise RuntimeError("Shared prefill did not reduce the prompt batch")
+            state["pending"] = False
+            output.past_key_values = self.engine.repeat_shared_prefill_cache(batch_size, repeats)
+            output.logits = output.logits.repeat_interleave(repeats, dim=0)
+            return output
+
+        pre_handle = module.register_forward_pre_hook(reduce_prompt_batch, with_kwargs=True)
+        post_handle = module.register_forward_hook(expand_prompt_output, with_kwargs=True)
+        return pre_handle, post_handle
 
     @staticmethod
     def _sample_top_p(logits: torch.Tensor, temperature: float = 1.0, top_p: float = 1.0) -> torch.Tensor:

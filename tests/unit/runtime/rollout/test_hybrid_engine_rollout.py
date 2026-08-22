@@ -7,6 +7,7 @@
 Tests cover configuration, profiling, generation dispatch, and the pure-tensor sampling helper.
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,6 +15,7 @@ import torch
 
 from benchmarks.opsd.benchmark_hybrid_engine_rollout import (_ordered_case_specs, _parse_args, _profile_rollout,
                                                               _summarize, _validate_args)
+from deepspeed.ops.transformer.inference.op_binding.workspace import WorkspaceOp
 from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import (
@@ -55,6 +57,7 @@ def test_config_defaults():
     assert cfg.use_graph_capture is False
     assert cfg.enable_profiling is False
     assert cfg.enable_generation_phase_profiling is True
+    assert cfg.use_shared_prefill is False
 
 
 # -- constructor --------------------------------------------------------
@@ -68,6 +71,7 @@ def test_constructor_stores_config():
     assert rollout.use_graph_capture is True
     assert rollout.enable_profiling is True
     assert rollout.enable_generation_phase_profiling is True
+    assert rollout.use_shared_prefill is False
     assert rollout.engine is engine
     assert rollout.tokenizer is tok
 
@@ -77,6 +81,7 @@ def test_constructor_defaults_without_cfg():
     assert rollout.use_graph_capture is False
     assert rollout.enable_profiling is False
     assert rollout.enable_generation_phase_profiling is True
+    assert rollout.use_shared_prefill is False
 
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
@@ -243,6 +248,20 @@ def test_benchmark_parses_disabled_generation_phase_profiling():
     assert args.enable_generation_phase_profiling is False
 
 
+def test_benchmark_parses_shared_prefill_flag():
+    args = _parse_args(["--use-shared-prefill"])
+
+    assert args.use_shared_prefill is True
+
+
+@pytest.mark.parametrize("incompatible_flag", ["--use-graph-capture", "--release-inference-cache"])
+def test_benchmark_rejects_incompatible_shared_prefill_modes(incompatible_flag):
+    args = _parse_args(["--use-shared-prefill", incompatible_flag])
+
+    with pytest.raises(ValueError, match="Shared prefill does not support"):
+        _validate_args(args)
+
+
 def test_benchmark_rejects_profiler_matrix():
     args = _parse_args(["--torch-profile-output", "/tmp/trace.json"])
 
@@ -250,7 +269,7 @@ def test_benchmark_rejects_profiler_matrix():
         _validate_args(args)
 
 
-@patch("benchmarks.opsd.benchmark_hybrid_engine_rollout.torch.cuda.is_available", return_value=False)
+@patch("benchmarks.opsd.benchmark_hybrid_engine_rollout.torch.cuda.is_available", return_value=False)  #ignore-cuda
 @patch("benchmarks.opsd.benchmark_hybrid_engine_rollout.torch.profiler.profile")
 def test_benchmark_exports_profiler_trace(mock_profile, _mock_cuda_available, tmp_path):
     rollout = MagicMock()
@@ -283,6 +302,102 @@ def test_benchmark_initializes_workspace_with_largest_effective_batch():
 
     assert requested[0] == (1, 1, 512, 32)
     assert requested[execution_order[0]][0:2] == (2, 4)
+
+
+def test_shared_prefill_hooks_reduce_prompt_and_expand_output():
+    class PromptModule(torch.nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.forward_batch_sizes = []
+
+        def forward(self, input_ids, attention_mask=None):
+            self.forward_batch_sizes.append(input_ids.shape[0])
+            values = input_ids[:, None, :, None].float()
+            return SimpleNamespace(logits=input_ids[:, :, None].float(), past_key_values=((values, values), ))
+
+    engine = _make_engine()
+    engine.repeat_shared_prefill_cache.return_value = ((torch.zeros(4, 1, 2, 1), torch.zeros(4, 1, 2, 1)), )
+    module = PromptModule()
+    rollout = HybridEngineRollout(engine, _make_tokenizer())
+    handles = rollout._register_shared_prefill_hooks(module, batch_size=2, repeats=2)
+    prompt_ids = torch.tensor([[1, 2], [1, 2], [3, 4], [3, 4]])
+
+    output = module(input_ids=prompt_ids, attention_mask=torch.ones_like(prompt_ids))
+    decode_output = module(input_ids=torch.ones(4, 1, dtype=torch.long))
+    for handle in handles:
+        handle.remove()
+
+    assert module.forward_batch_sizes == [2, 4]
+    assert output.logits.shape[0] == 4
+    assert output.past_key_values[0][0].shape[0] == 4
+    assert decode_output.logits.shape[0] == 4
+    engine.repeat_shared_prefill_cache.assert_called_once_with(2, 2)
+
+
+def test_generate_uses_shared_prefill_for_multiple_samples():
+    class GenerateModule(torch.nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.forward_batch_sizes = []
+
+        def forward(self, input_ids, attention_mask=None):
+            self.forward_batch_sizes.append(input_ids.shape[0])
+            values = input_ids[:, None, :, None].float()
+            return SimpleNamespace(logits=input_ids[:, :, None].float(), past_key_values=((values, values), ))
+
+        def generate(self, input_ids, attention_mask=None, max_new_tokens=1, **_kwargs):
+            self(input_ids=input_ids, attention_mask=attention_mask)
+            response = torch.ones(input_ids.shape[0], max_new_tokens, dtype=input_ids.dtype)
+            return torch.cat((input_ids, response), dim=1)
+
+    engine = _make_engine()
+    engine.module = GenerateModule()
+    config = HybridEngineRolloutConfig(use_shared_prefill=True)
+    rollout = HybridEngineRollout(engine, _make_tokenizer(), config)
+
+    output = rollout.generate(_make_request(), _make_sampling(n_samples_per_prompt=2))
+
+    assert engine.module.forward_batch_sizes == [2]
+    assert output.input_ids[:, 3:].shape == (4, 2)
+    engine.prepare_shared_prefill.assert_called_once_with(2, 2, 3)
+    engine.repeat_shared_prefill_cache.assert_called_once_with(2, 2)
+
+
+def test_shared_prefill_fallback_repeats_prompt_cache():
+    key_cache = torch.zeros(4, 1, 3, 1)
+    value_cache = torch.zeros_like(key_cache)
+    key_cache[:2, :, :2, :] = torch.tensor([[[[1.0], [2.0]]], [[[3.0], [4.0]]]])
+    value_cache[:2, :, :2, :] = key_cache[:2, :, :2, :] + 10
+    workspace = WorkspaceOp.__new__(WorkspaceOp)
+    workspace.inference_context = SimpleNamespace(
+        kv_cache_size=key_cache.shape,
+        kv_cache=[(key_cache, value_cache)],
+        current_tokens=lambda: 3,
+    )
+
+    repeated_cache = workspace.repeat_kv_cache_fallback(source_batch_size=2, repeats=2)
+
+    expected_key = torch.tensor([1.0, 1.0, 3.0, 3.0])
+    assert torch.equal(key_cache[:, 0, 0, 0], expected_key)
+    assert torch.equal(value_cache[:, 0, 0, 0], expected_key + 10)
+    assert repeated_cache[0].shape == (4, 1, 2, 1)
+    assert repeated_cache[1].shape == (4, 1, 2, 1)
+
+
+def test_engine_pairs_shared_prefill_cache_tensors():
+    key_cache = torch.zeros(4, 1, 2, 1)
+    value_cache = torch.ones_like(key_cache)
+    workspace = MagicMock()
+    workspace.repeat_kv_cache.return_value = [key_cache, value_cache]
+    engine = SimpleNamespace(_shared_prefill_workspace=workspace)
+
+    repeated_cache = DeepSpeedHybridEngine.repeat_shared_prefill_cache(engine, 2, 2)
+
+    assert repeated_cache[0][0] is key_cache
+    assert repeated_cache[0][1] is value_cache
+    workspace.repeat_kv_cache.assert_called_once_with(2, 2)
 
 
 # -- _sample_top_p ------------------------------------------------------

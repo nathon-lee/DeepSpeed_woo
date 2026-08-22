@@ -9,6 +9,7 @@ for a later benchmark stage.
 """
 
 import argparse
+import hashlib
 import itertools
 import json
 import math
@@ -71,6 +72,10 @@ def _validate_args(args):
         raise ValueError("top-p must be in the interval (0, 1]")
     if args.use_graph_capture and args.temperature > 0.0:
         raise ValueError("CUDA graph capture currently supports greedy decoding only")
+    if args.use_shared_prefill and args.use_graph_capture:
+        raise ValueError("Shared prefill does not support CUDA graph capture")
+    if args.use_shared_prefill and args.release_inference_cache:
+        raise ValueError("Shared prefill does not support release_inference_cache")
     if args.torch_profile_output:
         matrix_dimensions = (args.batch_sizes, args.samples_per_prompt, args.prompt_lengths, args.response_lengths)
         if any(len(values) != 1 for values in matrix_dimensions):
@@ -170,17 +175,20 @@ def _run_case(rollout, model, args, batch_size, samples_per_prompt, prompt_lengt
     accelerator.reset_peak_memory_stats()
     profiles = []
     for _ in range(args.iterations):
-        rollout.generate(request, sampling)
+        output = rollout.generate(request, sampling)
         profiles.append(dict(rollout.get_last_profile()))
 
     decode_graphs = getattr(rollout.engine, "_decode_graphs", None)
     captured_positions = decode_graphs.captured_positions if decode_graphs is not None else 0
+    response_tokens = output.input_ids[:, prompt_length:].detach().cpu().contiguous()
+    response_token_sha256 = hashlib.sha256(response_tokens.numpy().tobytes()).hexdigest()
     return {
         "batch_size": batch_size,
         "samples_per_prompt": samples_per_prompt,
         "prompt_length": prompt_length,
         "requested_response_length": response_length,
         "returned_response_length": profiles[-1]["response_length"],
+        "response_token_sha256": response_token_sha256,
         "cuda_graph_captured_positions": captured_positions,
         "peak_memory_mb": accelerator.max_memory_allocated() / (1024**2),
         "summary": _summarize(profiles),
@@ -219,6 +227,7 @@ def _run(args):
             use_graph_capture=args.use_graph_capture,
             enable_profiling=True,
             enable_generation_phase_profiling=enable_generation_phase_profiling,
+            use_shared_prefill=args.use_shared_prefill,
         )
         rollout = HybridEngineRollout(engine, tokenizer, rollout_config)
 
@@ -240,6 +249,7 @@ def _run(args):
             "temperature": args.temperature,
             "top_p": args.top_p,
             "use_graph_capture": args.use_graph_capture,
+            "use_shared_prefill": args.use_shared_prefill,
             "generation_phase_profiling": enable_generation_phase_profiling,
             "torch_profile_output": args.torch_profile_output,
             "release_inference_cache": args.release_inference_cache,
@@ -269,6 +279,9 @@ def _parse_args(argv=None):
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--release-inference-cache", action="store_true")
     parser.add_argument("--use-graph-capture", action="store_true", help="Use CUDA graph capture for greedy decode")
+    parser.add_argument("--use-shared-prefill",
+                        action="store_true",
+                        help="Prefill each prompt once before branching response samples")
     parser.add_argument("--no-generation-phase-profiling",
                         action="store_false",
                         dest="enable_generation_phase_profiling",

@@ -64,3 +64,21 @@ hooks, and writes the top operator table alongside the trace as
 For benchmark matrices, cases execute from the largest effective batch to the
 smallest because HybridEngine sizes its inference workspace on the first
 forward. Results remain in the user-requested matrix order.
+
+Shared Prompt Prefill
+---------------------
+
+When one prompt branches into multiple response samples,
+``HybridEngineRolloutConfig(use_shared_prefill=True)`` computes the prompt
+forward once and repeats its KV cache before decoding the independent response
+branches. The option is disabled by default. The OPSD benchmark exposes the
+same path through ``--use-shared-prefill`` for direct comparison with the
+default expanded-prompt behavior. Each case records ``response_token_sha256``
+so matching-seed baseline and shared-prefill runs can verify identical output
+tokens without storing them in the result file.
+
+Shared prefill currently requires HybridEngine kernel injection, ZeRO stage 0,
+inference tensor-parallel size 1, an internal KV cache, and a prompt longer than
+one token. It cannot be combined with CUDA graph capture or
+``release_inference_cache``. Sampling still happens independently for every
+response branch after the shared prompt forward.

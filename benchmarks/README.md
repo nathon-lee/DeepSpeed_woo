@@ -27,3 +27,11 @@ Run the same command with ``--release-inference-cache`` and a different output
 path to measure the cost of releasing and reacquiring the inference workspace.
 The output JSON contains the raw profiles and mean, p50, and p95 values for each
 stage and workload.
+
+To measure shared prompt prefill for multiple response samples, compare the
+default command with a matching run that adds ``--use-shared-prefill``. This
+mode currently requires ZeRO stage 0, inference tensor-parallel size 1, and the
+internal HybridEngine KV cache. It cannot be combined with
+``--use-graph-capture`` or ``--release-inference-cache``. Matching
+``response_token_sha256`` values confirm that the baseline and shared-prefill
+runs returned identical response tokens.
