@@ -42,7 +42,9 @@ profile also includes ``cache_retake_ms``, ``model_generation_ms``, and
 generation, and cache release from the rollout-level timings.
 When phase profiling is enabled, ``prefill_ms`` and ``decode_ms`` split
 ``model_generation_ms`` into the initial prompt forward and subsequent token
-forwards.
+forwards. Use ``--no-generation-phase-profiling`` in the OPSD benchmark to
+omit those per-forward synchronization points when comparing end-to-end
+performance.
 For released caches, ``workspace_release_ms``, ``gc_collect_ms``, and
 ``empty_cache_ms`` further break down cache cleanup. The profile also records
 allocated and reserved memory immediately before and after cache release.

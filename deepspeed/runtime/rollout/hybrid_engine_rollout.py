@@ -23,6 +23,7 @@ class HybridEngineRolloutConfig:
     """Configuration for HybridEngineRollout."""
     use_graph_capture: bool = False
     enable_profiling: bool = False
+    enable_generation_phase_profiling: bool = True
 
 
 class HybridEngineRollout(RolloutEngine):
@@ -39,6 +40,8 @@ class HybridEngineRollout(RolloutEngine):
         self.tokenizer = tokenizer
         self.use_graph_capture = getattr(cfg, 'use_graph_capture', False) if cfg else False
         self.enable_profiling = getattr(cfg, 'enable_profiling', False) if cfg else False
+        self.enable_generation_phase_profiling = getattr(cfg, 'enable_generation_phase_profiling',
+                                                          True) if cfg else True
         self._last_profile = None
 
     @torch.no_grad()
@@ -84,7 +87,8 @@ class HybridEngineRollout(RolloutEngine):
         }
         if self.use_graph_capture:
             generation_kwargs["min_new_tokens"] = max_new_tokens
-        self.engine._profile_generation_phases = self.enable_profiling
+        profile_generation_phases = self.enable_profiling and self.enable_generation_phase_profiling
+        self.engine._profile_generation_phases = profile_generation_phases
         try:
             output_ids = module.generate(prompt_ids, **generation_kwargs)
         finally:
@@ -132,15 +136,20 @@ class HybridEngineRollout(RolloutEngine):
                 "prompt_length": prompt_len,
                 "response_length": response_length,
             }
-            for source_name, profile_name in (
-                    ("_cache_retake_latency", "cache_retake_ms"),
-                    ("_model_generation_latency", "model_generation_ms"),
+            engine_timings = [
+                ("_cache_retake_latency", "cache_retake_ms"),
+                ("_model_generation_latency", "model_generation_ms"),
+                ("_cache_release_latency", "cache_release_ms"),
+                ("_workspace_release_latency", "workspace_release_ms"),
+                ("_gc_collect_latency", "gc_collect_ms"),
+                ("_empty_cache_latency", "empty_cache_ms"),
+            ]
+            if self.enable_generation_phase_profiling:
+                engine_timings.extend([
                     ("_prefill_latency", "prefill_ms"),
                     ("_decode_latency", "decode_ms"),
-                    ("_cache_release_latency", "cache_release_ms"),
-                    ("_workspace_release_latency", "workspace_release_ms"),
-                    ("_gc_collect_latency", "gc_collect_ms"),
-                    ("_empty_cache_latency", "empty_cache_ms")):
+                ])
+            for source_name, profile_name in engine_timings:
                 value = getattr(self.engine, source_name, None)
                 if isinstance(value, Real):
                     self._last_profile[profile_name] = value * 1000.0

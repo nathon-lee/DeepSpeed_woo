@@ -173,6 +173,7 @@ def _run(args):
         rollout_config = HybridEngineRolloutConfig(
             use_graph_capture=args.use_graph_capture,
             enable_profiling=True,
+            enable_generation_phase_profiling=args.enable_generation_phase_profiling,
         )
         rollout = HybridEngineRollout(engine, tokenizer, rollout_config)
 
@@ -193,6 +194,7 @@ def _run(args):
             "temperature": args.temperature,
             "top_p": args.top_p,
             "use_graph_capture": args.use_graph_capture,
+            "generation_phase_profiling": args.enable_generation_phase_profiling,
             "release_inference_cache": args.release_inference_cache,
             "cases": cases,
         }
@@ -220,6 +222,10 @@ def _parse_args(argv=None):
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--release-inference-cache", action="store_true")
     parser.add_argument("--use-graph-capture", action="store_true", help="Use CUDA graph capture for greedy decode")
+    parser.add_argument("--no-generation-phase-profiling",
+                        action="store_false",
+                        dest="enable_generation_phase_profiling",
+                        help="Disable per-forward prefill and decode profiling")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--output", default="opsd_rollout_profile.json")
     return parser.parse_args(argv)

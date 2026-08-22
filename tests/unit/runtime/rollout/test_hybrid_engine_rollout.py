@@ -53,6 +53,7 @@ def test_config_defaults():
     cfg = HybridEngineRolloutConfig()
     assert cfg.use_graph_capture is False
     assert cfg.enable_profiling is False
+    assert cfg.enable_generation_phase_profiling is True
 
 
 # -- constructor --------------------------------------------------------
@@ -65,6 +66,7 @@ def test_constructor_stores_config():
     rollout = HybridEngineRollout(engine, tok, cfg=cfg)
     assert rollout.use_graph_capture is True
     assert rollout.enable_profiling is True
+    assert rollout.enable_generation_phase_profiling is True
     assert rollout.engine is engine
     assert rollout.tokenizer is tok
 
@@ -73,6 +75,7 @@ def test_constructor_defaults_without_cfg():
     rollout = HybridEngineRollout(_make_engine(), _make_tokenizer())
     assert rollout.use_graph_capture is False
     assert rollout.enable_profiling is False
+    assert rollout.enable_generation_phase_profiling is True
 
 
 @patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
@@ -138,6 +141,29 @@ def test_generate_does_not_profile_when_disabled(mock_get_accelerator):
 
     assert rollout.get_last_profile() is None
     mock_get_accelerator.assert_not_called()
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.time.perf_counter")
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_generate_skips_generation_phase_profile_when_disabled(mock_get_accelerator, mock_perf_counter):
+    engine = _make_engine()
+    cfg = HybridEngineRolloutConfig(enable_profiling=True, enable_generation_phase_profiling=False)
+    rollout = HybridEngineRollout(engine, _make_tokenizer(), cfg=cfg)
+    engine._prefill_latency = 0.003
+    engine._decode_latency = 0.007
+
+    def generate(*_args, **_kwargs):
+        assert engine._profile_generation_phases is False
+        return torch.tensor([[0, 1, 2, 5, 6], [0, 3, 4, 7, 8]])
+
+    engine.module.generate.side_effect = generate
+    mock_perf_counter.side_effect = [1.0, 1.001, 1.011, 1.013]
+
+    rollout.generate(_make_request(), _make_sampling())
+
+    profile = rollout.get_last_profile()
+    assert "prefill_ms" not in profile
+    assert "decode_ms" not in profile
 
 
 @patch("deepspeed.runtime.hybrid_engine.time.perf_counter")
@@ -208,6 +234,12 @@ def test_benchmark_parses_graph_capture_flag():
     args = _parse_args(["--use-graph-capture"])
 
     assert args.use_graph_capture is True
+
+
+def test_benchmark_parses_disabled_generation_phase_profiling():
+    args = _parse_args(["--no-generation-phase-profiling"])
+
+    assert args.enable_generation_phase_profiling is False
 
 
 # -- _sample_top_p ------------------------------------------------------
