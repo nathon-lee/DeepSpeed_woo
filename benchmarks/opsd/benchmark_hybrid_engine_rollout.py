@@ -71,6 +71,10 @@ def _validate_args(args):
         raise ValueError("top-p must be in the interval (0, 1]")
     if args.use_graph_capture and args.temperature > 0.0:
         raise ValueError("CUDA graph capture currently supports greedy decoding only")
+    if args.torch_profile_output:
+        matrix_dimensions = (args.batch_sizes, args.samples_per_prompt, args.prompt_lengths, args.response_lengths)
+        if any(len(values) != 1 for values in matrix_dimensions):
+            raise ValueError("Torch profiling requires exactly one value for each benchmark matrix dimension")
 
 
 def _load_model_and_tokenizer(model_name, dtype, device):
@@ -120,6 +124,32 @@ def _make_request(model, batch_size, prompt_length, device):
     return RolloutRequest(prompt_ids=prompt_ids, prompt_attention_mask=prompt_attention_mask)
 
 
+def _profile_rollout(rollout, request, sampling, output_path):
+    activities = [torch.profiler.ProfilerActivity.CPU]
+    sort_by = "self_cpu_time_total"
+    if torch.cuda.is_available():
+        activities.append(torch.profiler.ProfilerActivity.CUDA)
+        sort_by = "self_cuda_time_total"
+
+    trace_path = Path(output_path)
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    with torch.profiler.profile(
+            activities=activities,
+            record_shapes=True,
+            profile_memory=True,
+            with_flops=True,
+    ) as profiler:
+        rollout.generate(request, sampling)
+
+    profiler.export_chrome_trace(str(trace_path))
+    summary = profiler.key_averages().table(sort_by=sort_by, row_limit=30)
+    summary_path = trace_path.with_suffix(".summary.txt")
+    summary_path.write_text(summary + "\n", encoding="utf-8")
+    print(summary)
+    print(f"Wrote profiler trace to {trace_path}")
+    print(f"Wrote profiler summary to {summary_path}")
+
+
 def _run_case(rollout, model, args, batch_size, samples_per_prompt, prompt_length, response_length, device):
     request = _make_request(model, batch_size, prompt_length, device)
     sampling = SamplingConfig(
@@ -133,6 +163,8 @@ def _run_case(rollout, model, args, batch_size, samples_per_prompt, prompt_lengt
         rollout.generate(request, sampling)
 
     accelerator = get_accelerator()
+    if args.torch_profile_output:
+        _profile_rollout(rollout, request, sampling, args.torch_profile_output)
     accelerator.reset_peak_memory_stats()
     profiles = []
     for _ in range(args.iterations):
@@ -170,10 +202,12 @@ def _run(args):
     try:
         model, tokenizer = _load_model_and_tokenizer(args.model, dtype, device)
         engine = _build_engine(model, args)
+        enable_generation_phase_profiling = (args.enable_generation_phase_profiling
+                                             and not args.torch_profile_output)
         rollout_config = HybridEngineRolloutConfig(
             use_graph_capture=args.use_graph_capture,
             enable_profiling=True,
-            enable_generation_phase_profiling=args.enable_generation_phase_profiling,
+            enable_generation_phase_profiling=enable_generation_phase_profiling,
         )
         rollout = HybridEngineRollout(engine, tokenizer, rollout_config)
 
@@ -194,7 +228,8 @@ def _run(args):
             "temperature": args.temperature,
             "top_p": args.top_p,
             "use_graph_capture": args.use_graph_capture,
-            "generation_phase_profiling": args.enable_generation_phase_profiling,
+            "generation_phase_profiling": enable_generation_phase_profiling,
+            "torch_profile_output": args.torch_profile_output,
             "release_inference_cache": args.release_inference_cache,
             "cases": cases,
         }
@@ -226,6 +261,7 @@ def _parse_args(argv=None):
                         action="store_false",
                         dest="enable_generation_phase_profiling",
                         help="Disable per-forward prefill and decode profiling")
+    parser.add_argument("--torch-profile-output", help="Write a one-iteration PyTorch profiler Chrome trace")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--output", default="opsd_rollout_profile.json")
     return parser.parse_args(argv)

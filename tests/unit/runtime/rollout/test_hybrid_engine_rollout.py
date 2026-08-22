@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from benchmarks.opsd.benchmark_hybrid_engine_rollout import _parse_args, _summarize
+from benchmarks.opsd.benchmark_hybrid_engine_rollout import _parse_args, _profile_rollout, _summarize, _validate_args
 from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import (
@@ -240,6 +240,28 @@ def test_benchmark_parses_disabled_generation_phase_profiling():
     args = _parse_args(["--no-generation-phase-profiling"])
 
     assert args.enable_generation_phase_profiling is False
+
+
+def test_benchmark_rejects_profiler_matrix():
+    args = _parse_args(["--torch-profile-output", "/tmp/trace.json"])
+
+    with pytest.raises(ValueError, match="exactly one value"):
+        _validate_args(args)
+
+
+@patch("benchmarks.opsd.benchmark_hybrid_engine_rollout.torch.cuda.is_available", return_value=False)
+@patch("benchmarks.opsd.benchmark_hybrid_engine_rollout.torch.profiler.profile")
+def test_benchmark_exports_profiler_trace(mock_profile, _mock_cuda_available, tmp_path):
+    rollout = MagicMock()
+    profiler = mock_profile.return_value.__enter__.return_value
+    profiler.key_averages.return_value.table.return_value = "profile summary"
+    trace_path = tmp_path / "trace.json"
+
+    _profile_rollout(rollout, MagicMock(), MagicMock(), trace_path)
+
+    rollout.generate.assert_called_once()
+    profiler.export_chrome_trace.assert_called_once_with(str(trace_path))
+    assert trace_path.with_suffix(".summary.txt").read_text().strip() == "profile summary"
 
 
 # -- _sample_top_p ------------------------------------------------------

@@ -56,3 +56,8 @@ The OPSD benchmark accepts ``--use-graph-capture`` to compare greedy decode
 against its default HuggingFace generation path. Each benchmark case records
 ``cuda_graph_captured_positions`` so a capture failure and eager fallback are
 visible in the output.
+Use ``--torch-profile-output TRACE.json`` with a single benchmark case to
+capture one additional rollout after warmup. The profiler trace is excluded
+from benchmark summary statistics, automatically disables generation phase
+hooks, and writes the top operator table alongside the trace as
+``TRACE.summary.txt``.
