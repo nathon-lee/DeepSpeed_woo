@@ -61,3 +61,6 @@ capture one additional rollout after warmup. The profiler trace is excluded
 from benchmark summary statistics, automatically disables generation phase
 hooks, and writes the top operator table alongside the trace as
 ``TRACE.summary.txt``.
+For benchmark matrices, cases execute from the largest effective batch to the
+smallest because HybridEngine sizes its inference workspace on the first
+forward. Results remain in the user-requested matrix order.

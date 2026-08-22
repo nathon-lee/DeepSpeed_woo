@@ -12,7 +12,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from benchmarks.opsd.benchmark_hybrid_engine_rollout import _parse_args, _profile_rollout, _summarize, _validate_args
+from benchmarks.opsd.benchmark_hybrid_engine_rollout import (_ordered_case_specs, _parse_args, _profile_rollout,
+                                                              _summarize, _validate_args)
 from deepspeed.runtime.hybrid_engine import DeepSpeedHybridEngine
 from deepspeed.runtime.rollout.base import RolloutRequest, SamplingConfig
 from deepspeed.runtime.rollout.hybrid_engine_rollout import (
@@ -262,6 +263,26 @@ def test_benchmark_exports_profiler_trace(mock_profile, _mock_cuda_available, tm
     rollout.generate.assert_called_once()
     profiler.export_chrome_trace.assert_called_once_with(str(trace_path))
     assert trace_path.with_suffix(".summary.txt").read_text().strip() == "profile summary"
+
+
+def test_benchmark_initializes_workspace_with_largest_effective_batch():
+    args = _parse_args([
+        "--batch-sizes",
+        "1",
+        "2",
+        "--samples-per-prompt",
+        "1",
+        "4",
+        "--prompt-lengths",
+        "512",
+        "--response-lengths",
+        "32",
+    ])
+
+    requested, execution_order = _ordered_case_specs(args)
+
+    assert requested[0] == (1, 1, 512, 32)
+    assert requested[execution_order[0]][0:2] == (2, 4)
 
 
 # -- _sample_top_p ------------------------------------------------------
