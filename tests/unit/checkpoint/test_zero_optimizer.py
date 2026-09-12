@@ -665,6 +665,20 @@ def test_elastic_checkpoint_is_deprecated_for_zero3(monkeypatch):
     assert any("elastic checkpointing is deprecated" in str(message).lower() for message in warning_messages)
 
 
+@pytest.mark.parametrize('zero_stage', [1, 2])
+def test_elastic_checkpoint_is_deprecated_for_zero12(monkeypatch, zero_stage):
+    warning_messages = []
+
+    def mock_logger_warning(message, *args, **kwargs):
+        warning_messages.append(message)
+
+    monkeypatch.setattr("deepspeed.utils.logger.warning", mock_logger_warning)
+
+    DeepSpeedZeroConfig(stage=zero_stage, elastic_checkpoint=True)
+
+    assert any("elastic checkpointing is deprecated" in str(message).lower() for message in warning_messages)
+
+
 class TestZeRONonDistributed(DistributedTest):
     world_size = 1
     # This test calls deepspeed.initialize(), so use the harness' file-store

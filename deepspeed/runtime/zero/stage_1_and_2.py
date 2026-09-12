@@ -2774,6 +2774,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             checkpoint['optimizer'] = optimizer.state_dict()
             torch.save(checkpoint, "saved.pth")
         """
+        if self.elastic_checkpoint:
+            raise NotImplementedError(
+                "ZeRO elastic checkpointing is deprecated and unsupported. Use Universal Checkpointing instead.")
+
         state_dict = {}
         state_dict[LOSS_SCALER] = self.loss_scaler
         state_dict['dynamic_loss_scale'] = self.dynamic_loss_scale
@@ -3063,6 +3067,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         checkpoint_folder=None,
                         load_serial=None,
                         param_shapes=None):
+        if self.elastic_checkpoint:
+            raise NotImplementedError(
+                "ZeRO elastic checkpointing is deprecated and unsupported. Use Universal Checkpointing instead.")
+
         if checkpoint_folder:
             self._load_universal_checkpoint(checkpoint_folder, load_optimizer_states, load_from_fp32_weights)
         else:

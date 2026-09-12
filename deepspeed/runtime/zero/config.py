@@ -412,8 +412,8 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
 
     @model_validator(mode="after")
     def elastic_checkpoint_deprecated(self):
-        if self.stage == ZeroStageEnum.weights and self.elastic_checkpoint:
+        if self.elastic_checkpoint:
             logger.warning(
-                "ZeRO-3 elastic checkpointing is deprecated and no longer supported. Use Universal Checkpointing instead."
+                "ZeRO elastic checkpointing is deprecated and no longer supported. Use Universal Checkpointing instead."
             )
         return self
