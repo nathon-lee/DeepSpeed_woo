@@ -339,4 +339,3 @@ The first implementation does not require:
 - [SGLang RadixAttention]([https://sgl-project-sglang-93.mintlify.app/concepts/radix-attention](https://sgl-project-sglang-93.mintlify.app/concepts/radix-attention))
 - [Mooncake distributed KV cache]([https://github.com/kvcache-ai/Mooncake](https://github.com/kvcache-ai/Mooncake))
 - [PagedAttention]([https://arxiv.org/abs/2309.06180](https://arxiv.org/abs/2309.06180))
-```
