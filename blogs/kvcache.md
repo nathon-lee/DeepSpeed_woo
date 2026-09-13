@@ -1,4 +1,3 @@
-```markdown
 # [RFC] Training-aware paged KV cache for OPSD rollouts
 
 ## Summary
