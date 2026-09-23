@@ -144,7 +144,9 @@ class HybridEngineRollout(RolloutEngine):
             forward_profile_handles = forward_profiler.register(module)
 
         shared_prefill_handles = []
+        legacy_cache_handles = []
         try:
+            legacy_cache_handles = self._register_legacy_cache_hooks(module)
             if self.use_shared_prefill and n > 1:
                 if self.use_graph_capture:
                     raise RuntimeError("Shared prefill does not support CUDA graph capture")
@@ -169,6 +171,8 @@ class HybridEngineRollout(RolloutEngine):
                     pad_token_id=pad_token_id,
                 )
         finally:
+            for handle in legacy_cache_handles:
+                handle.remove()
             for handle in shared_prefill_handles:
                 handle.remove()
             for handle in forward_profile_handles:
@@ -701,6 +705,45 @@ class HybridEngineRollout(RolloutEngine):
         post_handle = module.register_forward_hook(expand_prompt_output, with_kwargs=True)
         return pre_handle, post_handle
 
+    @classmethod
+    def _register_legacy_cache_hooks(cls, module):
+        """Adapt Cache objects for decoder models that only accept KV tuples."""
+        if getattr(module, "_supports_cache_class", False):
+            return ()
+
+        def convert_cache(_module, args, kwargs):
+            cache = kwargs.get("past_key_values")
+            if not cls._is_cache_object(cache):
+                return args, kwargs
+            kwargs = dict(kwargs)
+            kwargs["past_key_values"] = cls._cache_to_legacy(cache)
+            return args, kwargs
+
+        return (module.register_forward_pre_hook(convert_cache, with_kwargs=True), )
+
+    @staticmethod
+    def _is_cache_object(cache):
+        return cache is not None and hasattr(cache, "layers") and hasattr(cache, "get_seq_length")
+
+    @staticmethod
+    def _cache_to_legacy(cache):
+        """Return the populated prefix of a Transformers Cache as legacy KV tuples."""
+        seq_length = cache.get_seq_length()
+        if isinstance(seq_length, torch.Tensor):
+            seq_length = int(seq_length.max().item())
+        else:
+            seq_length = int(seq_length)
+
+        legacy_cache = []
+        for layer in cache.layers:
+            keys = getattr(layer, "keys", None)
+            values = getattr(layer, "values", None)
+            if seq_length == 0 or keys is None or values is None:
+                legacy_cache.append(None)
+            else:
+                legacy_cache.append((keys[:, :, :seq_length, :], values[:, :, :seq_length, :]))
+        return tuple(legacy_cache)
+
     @staticmethod
     def _pad_after_eos(output_ids, response_start, eos_token_id, pad_token_id):
         """Retain the first response EOS and pad every subsequent position."""
@@ -730,6 +773,10 @@ class HybridEngineRollout(RolloutEngine):
 
     def _generate_graph(self, prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module, device):
         """Greedy decode with DeepSpeedStaticCache + CUDA graph capture."""
+        if not getattr(module, "_supports_cache_class", False):
+            return self._generate_graph_legacy_cache(prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module,
+                                                     device)
+
         from transformers import StaticCache
         from deepspeed.utils.static_cache import DeepSpeedStaticCache
 
@@ -841,6 +888,76 @@ class HybridEngineRollout(RolloutEngine):
             # Replay
             get_accelerator().replay_graph(graph)
             next_token = static_logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            output_ids.append(next_token)
+            eos_mask |= (next_token.squeeze(1) == eos_token_id)
+
+        return torch.cat(output_ids, dim=1)
+
+    def _generate_graph_legacy_cache(self, prompt_ids, prompt_attn, max_new_tokens, pad_token_id, module, device):
+        """Capture one graph per decode position for legacy tuple-cache decoders.
+
+        Legacy decoders create a new KV tuple on every forward.  A single graph
+        would retain the tuple shape from its first capture, so each position
+        needs its own graph with the corresponding cache length.
+        """
+        batch_size, prompt_len = prompt_ids.shape
+        max_len = prompt_len + max_new_tokens
+        eos_token_id = self.tokenizer.eos_token_id
+
+        prefill_out = self._call_model(
+            module,
+            prompt_ids,
+            attention_mask=prompt_attn,
+            past_key_values=None,
+            use_cache=True,
+        )
+        next_token = prefill_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        past_key_values = prefill_out.past_key_values
+        output_ids = [prompt_ids, next_token]
+        eos_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+        for step in range(max_new_tokens - 1):
+            if eos_mask.all():
+                output_ids.append(torch.full((batch_size, 1), pad_token_id, dtype=torch.long, device=device))
+                continue
+
+            position = prompt_len + step
+            static_token = next_token.clone()
+            static_attn = torch.zeros(batch_size, max_len, dtype=torch.long, device=device)
+            static_attn[:, :prompt_len] = prompt_attn
+            static_attn[:, prompt_len:position + 1] = 1
+            kwargs = {
+                "attention_mask": static_attn,
+                "past_key_values": past_key_values,
+                "use_cache": True,
+                "cache_position": torch.tensor([position], dtype=torch.long, device=device),
+                "position_ids": torch.full((batch_size, 1), position, dtype=torch.long, device=device),
+            }
+            parameters = signature(module.forward).parameters
+            if not any(parameter.kind == parameter.VAR_KEYWORD for parameter in parameters.values()):
+                kwargs = {name: value for name, value in kwargs.items() if name in parameters}
+
+            saved_pre = dict(module._forward_pre_hooks)
+            saved_post = dict(module._forward_hooks)
+            module._forward_pre_hooks.clear()
+            module._forward_hooks.clear()
+            try:
+                accelerator = get_accelerator()
+                stream = accelerator.Stream()
+                stream.wait_stream(accelerator.current_stream())
+                with accelerator.stream(stream):
+                    module(static_token, **kwargs)
+                accelerator.current_stream().wait_stream(stream)
+                graph = accelerator.create_graph()
+                with accelerator.capture_to_graph(graph):
+                    out = module(static_token, **kwargs)
+                accelerator.replay_graph(graph)
+            finally:
+                module._forward_pre_hooks.update(saved_pre)
+                module._forward_hooks.update(saved_post)
+
+            next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            past_key_values = out.past_key_values
             output_ids.append(next_token)
             eos_mask |= (next_token.squeeze(1) == eos_token_id)
 

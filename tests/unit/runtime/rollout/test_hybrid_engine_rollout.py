@@ -7,6 +7,7 @@ Most tests are CPU-only; the native shared-prefill cache test runs only when CUD
 the transformer inference extension are available.
 """
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -344,6 +345,112 @@ def test_generate_preserves_zero_pad_token_id():
     output = rollout.generate(_make_request(), _make_sampling())
 
     assert output.attention_mask[:, -1].tolist() == [0, 0]
+
+
+def _static_cache_with_prefix_length(length):
+
+    class StaticCache:
+
+        def __init__(self):
+            self.layers = [
+                SimpleNamespace(
+                    keys=torch.ones((1, 1, 8, 1)),
+                    values=torch.ones((1, 1, 8, 1)),
+                )
+            ]
+
+        def get_seq_length(self):
+            return length
+
+    return StaticCache()
+
+
+def test_generate_adapts_static_cache_for_legacy_gpt2():
+
+    class LegacyGPT2Model(torch.nn.Module):
+        _supports_cache_class = False
+
+        def __init__(self):
+            super().__init__()
+            self.cache_lengths = []
+
+        def forward(self, input_ids, past_key_values=None, **_kwargs):
+            # GPT-2's legacy cache path indexes each layer directly.
+            self.cache_lengths.append(0 if past_key_values[0] is None else past_key_values[0][0].shape[-2])
+            return SimpleNamespace(logits=torch.zeros((input_ids.shape[0], input_ids.shape[1], 8)))
+
+        def generate(self, input_ids, **_kwargs):
+            self(input_ids, past_key_values=_static_cache_with_prefix_length(0))
+            self(input_ids[:, -1:], past_key_values=_static_cache_with_prefix_length(2))
+            return torch.cat((input_ids, torch.ones((input_ids.shape[0], 1), dtype=input_ids.dtype)), dim=1)
+
+    model = LegacyGPT2Model()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), _make_tokenizer())
+
+    output = rollout.generate(_make_request(), SamplingConfig(max_new_tokens=1, temperature=0))
+
+    assert model.cache_lengths == [0, 2]
+    assert output.input_ids.tolist() == [[0, 1, 2, 1], [0, 3, 4, 1]]
+
+
+@patch("deepspeed.runtime.rollout.hybrid_engine_rollout.get_accelerator")
+def test_graph_generation_uses_legacy_kv_tuples_for_gpt2(mock_get_accelerator):
+
+    class FakeAccelerator:
+
+        def __init__(self):
+            self.replay_count = 0
+
+        class Stream:
+
+            def wait_stream(self, _stream):
+                pass
+
+        def current_stream(self):
+            return self.Stream()
+
+        def stream(self, _stream):
+            return nullcontext()
+
+        def create_graph(self):
+            return object()
+
+        def capture_to_graph(self, _graph):
+            return nullcontext()
+
+        def replay_graph(self, _graph):
+            self.replay_count += 1
+
+    class LegacyGPT2Model(torch.nn.Module):
+        _supports_cache_class = False
+
+        def __init__(self):
+            super().__init__()
+            self.cache_lengths = []
+
+        def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True):
+            del attention_mask, use_cache
+            past_length = 0 if past_key_values is None else past_key_values[0][0].shape[-2]
+            self.cache_lengths.append(past_length)
+            values = input_ids[:, None, :, None].float()
+            if past_key_values is not None:
+                values = torch.cat((past_key_values[0][0], values), dim=-2)
+            logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 8))
+            next_tokens = (input_ids[:, -1] + 1) % logits.shape[-1]
+            logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
+            return SimpleNamespace(logits=logits, past_key_values=((values, values), ))
+
+    accelerator = FakeAccelerator()
+    mock_get_accelerator.return_value = accelerator
+    model = LegacyGPT2Model()
+    rollout = HybridEngineRollout(SimpleNamespace(module=model), _make_tokenizer())
+    prompt_ids = torch.tensor([[1, 2]])
+
+    output = rollout._generate_graph(prompt_ids, torch.ones_like(prompt_ids), 3, 0, model, torch.device("cpu"))
+
+    assert output.tolist() == [[1, 2, 3, 4, 5]]
+    assert model.cache_lengths == [0, 2, 2, 3, 3]
+    assert accelerator.replay_count == 2
 
 
 def test_native_repeat_kv_cache_fp16_reverse_copy():
