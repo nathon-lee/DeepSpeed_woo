@@ -5,16 +5,42 @@
 
 #include "custom_cuda_layers.h"
 
+#define rows_trans 16
+#define cols_trans 16
 #define TRANSPOSE_TILE_DIM 32
 #define TRANSPOSE_BLOCK_ROWS 8
 #define TRANSPOSE_VEC4_THREADS_X 8
 #define TRANSPOSE_VEC2_THREADS_X 16
 
-#define TRANS0213_TILE_VEC 32
-#define TRANS0213_TILE_HEAD 8
-
 template <typename T>
 __global__ void Transpose_Kernel(const T* inp, T* out, int row_width, int col_width)
+{
+    __shared__ T data_block[rows_trans * (cols_trans + 1)];
+
+    int r = threadIdx.x / cols_trans;
+    int c = threadIdx.x % cols_trans;
+
+    int m = row_width / cols_trans;
+
+    int i = blockIdx.x / m * rows_trans + r;
+    int j = blockIdx.x % m * cols_trans + c;
+
+    int row_stride = rows_trans / ((rows_trans * cols_trans + THREADS - 1) / THREADS);
+
+    for (int k = 0; k < rows_trans; k += row_stride)
+        data_block[(k + r) * (cols_trans + 1) + c] = inp[(i + k) * row_width + j];
+
+    __syncthreads();
+
+    i = blockIdx.x % m * rows_trans + r;
+    j = blockIdx.x / m * cols_trans + c;
+
+    for (int k = 0; k < rows_trans; k += row_stride)
+        out[(i + k) * col_width + j] = data_block[c * (cols_trans + 1) + r + k];
+}
+
+template <typename T>
+__global__ void Transpose_Kernel_Tiled(const T* inp, T* out, int row_width, int col_width)
 {
     __shared__ T tile[TRANSPOSE_TILE_DIM][TRANSPOSE_TILE_DIM + 1];
 
@@ -148,35 +174,63 @@ void Transpose<__half>(const __half* inp_mat,
                        int cols,
                        cudaStream_t stream)
 {
-    dim3 grid_dim((cols + TRANSPOSE_TILE_DIM - 1) / TRANSPOSE_TILE_DIM,
-                  (rows + TRANSPOSE_TILE_DIM - 1) / TRANSPOSE_TILE_DIM);
+    const int64_t elements = static_cast<int64_t>(rows) * cols;
+    const bool legacy_compatible = rows % 16 == 0 && cols % 16 == 0;
+    const bool use_vectorized = elements >= (1 << 20) && rows >= 128 && cols >= 128 &&
+                                rows % 2 == 0 && cols % 2 == 0 &&
+                                reinterpret_cast<uintptr_t>(inp_mat) % sizeof(__half2) == 0 &&
+                                reinterpret_cast<uintptr_t>(out_mat) % sizeof(__half2) == 0;
 
-    if ((cols % 2 == 0) && ((reinterpret_cast<uintptr_t>(inp_mat) % sizeof(__half2)) == 0) &&
-        ((reinterpret_cast<uintptr_t>(out_mat) % sizeof(__half2)) == 0)) {
+    if (use_vectorized) {
+        dim3 grid_dim((cols + TRANSPOSE_TILE_DIM - 1) / TRANSPOSE_TILE_DIM,
+                      (rows + TRANSPOSE_TILE_DIM - 1) / TRANSPOSE_TILE_DIM);
         dim3 block_dim(TRANSPOSE_VEC2_THREADS_X, TRANSPOSE_BLOCK_ROWS);
         Transpose_Kernel_Half2<<<grid_dim, block_dim, 0, stream>>>(inp_mat, out_mat, cols, rows);
-    } else {
-        dim3 block_dim(TRANSPOSE_TILE_DIM, TRANSPOSE_BLOCK_ROWS);
-        Transpose_Kernel<__half><<<grid_dim, block_dim, 0, stream>>>(inp_mat, out_mat, cols, rows);
+        return;
     }
+    if (legacy_compatible) {
+        int threads = THREADS;
+        Transpose_Kernel<__half><<<(rows * cols + threads - 1) / threads, threads, 0, stream>>>(
+            inp_mat, out_mat, cols, rows);
+        return;
+    }
+
+    dim3 grid_dim((cols + TRANSPOSE_TILE_DIM - 1) / TRANSPOSE_TILE_DIM,
+                  (rows + TRANSPOSE_TILE_DIM - 1) / TRANSPOSE_TILE_DIM);
+    dim3 block_dim(TRANSPOSE_TILE_DIM, TRANSPOSE_BLOCK_ROWS);
+    Transpose_Kernel_Tiled<__half>
+        <<<grid_dim, block_dim, 0, stream>>>(inp_mat, out_mat, cols, rows);
 }
 
 template <>
 void Transpose<float>(const float* inp_mat, float* out_mat, int rows, int cols, cudaStream_t stream)
 {
-    dim3 grid_dim((cols + TRANSPOSE_TILE_DIM - 1) / TRANSPOSE_TILE_DIM,
-                  (rows + TRANSPOSE_TILE_DIM - 1) / TRANSPOSE_TILE_DIM);
+    const int64_t elements = static_cast<int64_t>(rows) * cols;
+    const bool legacy_compatible = rows % 16 == 0 && cols % 16 == 0;
+    const bool use_vectorized = elements >= (1 << 20) && rows >= 128 && cols >= 128 &&
+                                rows % 4 == 0 && cols % 4 == 0 &&
+                                reinterpret_cast<uintptr_t>(inp_mat) % sizeof(float4) == 0 &&
+                                reinterpret_cast<uintptr_t>(out_mat) % sizeof(float4) == 0;
 
-    if ((cols % 4 == 0) && ((reinterpret_cast<uintptr_t>(inp_mat) % sizeof(float4)) == 0) &&
-        ((reinterpret_cast<uintptr_t>(out_mat) % sizeof(float4)) == 0)) {
+    if (use_vectorized) {
+        dim3 grid_dim((cols + TRANSPOSE_TILE_DIM - 1) / TRANSPOSE_TILE_DIM,
+                      (rows + TRANSPOSE_TILE_DIM - 1) / TRANSPOSE_TILE_DIM);
         dim3 block_dim(TRANSPOSE_VEC4_THREADS_X, TRANSPOSE_BLOCK_ROWS);
         Transpose_Kernel_Vec4<<<grid_dim, block_dim, 0, stream>>>(inp_mat, out_mat, cols, rows);
-    } else {
-        dim3 block_dim(TRANSPOSE_TILE_DIM, TRANSPOSE_BLOCK_ROWS);
-        Transpose_Kernel<float><<<grid_dim, block_dim, 0, stream>>>(inp_mat, out_mat, cols, rows);
+        return;
     }
-}
+    if (legacy_compatible) {
+        int threads = THREADS;
+        Transpose_Kernel<float><<<(rows * cols + threads - 1) / threads, threads, 0, stream>>>(
+            inp_mat, out_mat, cols, rows);
+        return;
+    }
 
+    dim3 grid_dim((cols + TRANSPOSE_TILE_DIM - 1) / TRANSPOSE_TILE_DIM,
+                  (rows + TRANSPOSE_TILE_DIM - 1) / TRANSPOSE_TILE_DIM);
+    dim3 block_dim(TRANSPOSE_TILE_DIM, TRANSPOSE_BLOCK_ROWS);
+    Transpose_Kernel_Tiled<float><<<grid_dim, block_dim, 0, stream>>>(inp_mat, out_mat, cols, rows);
+}
 template <typename T>
 __global__ void transform_0213(T* output,
                                const T* vals,
@@ -193,8 +247,6 @@ __global__ void transform_0213<float>(float* output,
                                       int heads,
                                       int head_ext)
 {
-    (void)head_ext;
-
     int d0_stride = hidden_dim * seq_length;
     int d1_stride = hidden_dim;
     int d2_stride = hidden_dim / heads;
@@ -203,16 +255,10 @@ __global__ void transform_0213<float>(float* output,
     int d1_out_stride = d2_stride;
     int d2_out_stride = d2_stride * seq_length;
 
-    int tiles_per_head = (heads + blockDim.y - 1) / blockDim.y;
-    int d0 = blockIdx.x;
-    int d1 = blockIdx.y;
-    int vec_tile = blockIdx.z / tiles_per_head;
-    int head_tile = blockIdx.z % tiles_per_head;
-
-    int d2 = head_tile * blockDim.y + threadIdx.y;
-    int d3 = vec_tile * blockDim.x + threadIdx.x;
-
-    if (d2 >= heads || d3 >= d2_stride) return;
+    int d0 = blockIdx.x;                                                  // Batch
+    int d1 = blockIdx.y / head_ext;                                       // Sequence ID (0-127)
+    int d2 = threadIdx.y + (blockIdx.y % head_ext) * (heads / head_ext);  // Head (0-11)
+    int d3 = threadIdx.x;                                                 // Values (groups of 4)
 
     const float4* vals_vec = reinterpret_cast<const float4*>(vals);
     float4* output_vec = reinterpret_cast<float4*>(output);
@@ -230,7 +276,6 @@ __global__ void transform_0213<__half>(__half* output,
                                        int head_ext)
 {
 #ifdef HALF_PRECISION_AVAILABLE
-    (void)head_ext;
 
     int d0_stride = hidden_dim * seq_length;
     int d1_stride = hidden_dim;
@@ -240,16 +285,10 @@ __global__ void transform_0213<__half>(__half* output,
     int d1_out_stride = d2_stride;
     int d2_out_stride = d2_stride * seq_length;
 
-    int tiles_per_head = (heads + blockDim.y - 1) / blockDim.y;
-    int d0 = blockIdx.x;
-    int d1 = blockIdx.y;
-    int vec_tile = blockIdx.z / tiles_per_head;
-    int head_tile = blockIdx.z % tiles_per_head;
-
-    int d2 = head_tile * blockDim.y + threadIdx.y;
-    int d3 = vec_tile * blockDim.x + threadIdx.x;
-
-    if (d2 >= heads || d3 >= d2_stride) return;
+    int d0 = blockIdx.x;                                                  // Batch
+    int d1 = blockIdx.y / head_ext;                                       // Sequence ID (0-127)
+    int d2 = threadIdx.y + (blockIdx.y % head_ext) * (heads / head_ext);  // Head (0-11)
+    int d3 = threadIdx.x;                                                 // Values (groups of 4)
 
     float4 vals_arr[1];
 
@@ -271,16 +310,12 @@ void launch_transform_0213<float>(float* output,
                                   cudaStream_t stream)
 {
     hidden_dim >>= 2;
-    int vec_per_head = hidden_dim / heads;
-
-    dim3 block_dim(min(vec_per_head, TRANS0213_TILE_VEC), min(heads, TRANS0213_TILE_HEAD));
-    dim3 grid_dim(batch_size,
-                  seq_length,
-                  ((vec_per_head + block_dim.x - 1) / block_dim.x) *
-                      ((heads + block_dim.y - 1) / block_dim.y));
+    int head_ext = (hidden_dim - 1) / MAX_THREADS + 1;
+    dim3 block_dim(hidden_dim / heads, (heads / head_ext));
+    dim3 grid_dim(batch_size, (seq_length * head_ext));
 
     transform_0213<float>
-        <<<grid_dim, block_dim, 0, stream>>>(output, vals, hidden_dim, seq_length, heads, 1);
+        <<<grid_dim, block_dim, 0, stream>>>(output, vals, hidden_dim, seq_length, heads, head_ext);
 }
 
 template <>
@@ -293,16 +328,11 @@ void launch_transform_0213<__half>(__half* output,
                                    cudaStream_t stream)
 {
     hidden_dim >>= 3;
-    int vec_per_head = hidden_dim / heads;
-
-    dim3 block_dim(min(vec_per_head, TRANS0213_TILE_VEC), min(heads, TRANS0213_TILE_HEAD));
-    dim3 grid_dim(batch_size,
-                  seq_length,
-                  ((vec_per_head + block_dim.x - 1) / block_dim.x) *
-                      ((heads + block_dim.y - 1) / block_dim.y));
-
+    int head_ext = (hidden_dim - 1) / MAX_THREADS + 1;
+    dim3 block_dim(hidden_dim / heads, (heads / head_ext));
+    dim3 grid_dim(batch_size, (seq_length * head_ext));
     transform_0213<__half>
-        <<<grid_dim, block_dim, 0, stream>>>(output, vals, hidden_dim, seq_length, heads, 1);
+        <<<grid_dim, block_dim, 0, stream>>>(output, vals, hidden_dim, seq_length, heads, head_ext);
 }
 
 // Bias add
