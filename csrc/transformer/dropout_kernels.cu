@@ -129,12 +129,18 @@ __global__ void dropout_kernel(const int N,
 
 #else
 
+    // Preserve the scalar-float arithmetic of the ordinary FP16 path, but
+    // pack the four rounded FP16 results into two 32-bit stores.
+    const __half2* vals_half;
+    float2 vals_half_f[2];
+    float2 result_f;
+    __half2* result_h = reinterpret_cast<__half2*>(&result_f);
+
     CUDA_1D_KERNEL_LOOP(j, N / unroll_factor)
     {
         int i = j * unroll_factor;
 
-        const __half2* vals_half = reinterpret_cast<const __half2*>(Xdata + i);
-        float2 vals_half_f[2];
+        vals_half = reinterpret_cast<const __half2*>(Xdata + i);
         vals_half_f[0] = __half22float2(vals_half[0]);
         vals_half_f[1] = __half22float2(vals_half[1]);
 
@@ -145,10 +151,12 @@ __global__ void dropout_kernel(const int N,
         m[2] = (uint8_t)(rand.z > ratio);
         m[3] = (uint8_t)(rand.w > ratio);
 
-        out[i] = __float2half(vals_half_f[0].x * scale * m[0]);
-        out[i + 1] = __float2half(vals_half_f[0].y * scale * m[1]);
-        out[i + 2] = __float2half(vals_half_f[1].x * scale * m[2]);
-        out[i + 3] = __float2half(vals_half_f[1].y * scale * m[3]);
+        result_h[0] = __floats2half2_rn(vals_half_f[0].x * scale * m[0],
+                                        vals_half_f[0].y * scale * m[1]);
+        result_h[1] = __floats2half2_rn(vals_half_f[1].x * scale * m[2],
+                                        vals_half_f[1].y * scale * m[3]);
+
+        reinterpret_cast<float2*>(out)[j] = result_f;
 
         uint32_t m_32;
         uint8_t* m_packed = reinterpret_cast<uint8_t*>(&m_32);

@@ -1,0 +1,1 @@
+These result files are the actual run from 2026-09-24 in this worktree. The host has no `nvidia-smi`, no `nvcc`, and PyTorch reports `torch.cuda.is_available() == false`, so CUDA compilation, correctness, and performance are blocked. No speedup or hash-match claim is made from these files.
