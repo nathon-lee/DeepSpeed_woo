@@ -1,0 +1,63 @@
+{
+  "timestamp": "2026-09-24T03:14:41.638057+00:00",
+  "argv": [
+    "benchmarks/transpose/benchmark.py",
+    "--baseline",
+    "/tmp/DeepSpeed_transpose_baseline",
+    "--candidate",
+    "/tmp/DeepSpeed_transpose_work",
+    "--output",
+    "/tmp/transpose_benchmark_20260924T031431Z"
+  ],
+  "hostname": "nathon-AIBOOK-ABA14104",
+  "baseline_expected": "0b987c0e99f546e7867f0c6af4c8336d7d1e2eca",
+  "target_expected": "e90e6aef4a17a08446dd362aeed54042387bd531",
+  "gpu_before": {
+    "returncode": null,
+    "output": "[Errno 2] No such file or directory: 'nvidia-smi'"
+  },
+  "driver": {
+    "returncode": null,
+    "output": "[Errno 2] No such file or directory: 'nvidia-smi'"
+  },
+  "nvcc": {
+    "returncode": null,
+    "output": "[Errno 2] No such file or directory: 'nvcc'"
+  },
+  "compiler": {
+    "returncode": 0,
+    "output": "c++ (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0\nCopyright (C) 2021 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
+  },
+  "CUDA_VISIBLE_DEVICES": null,
+  "status": "blocked",
+  "baseline": {
+    "root": "/tmp/DeepSpeed_transpose_baseline",
+    "head": {
+      "returncode": 0,
+      "output": "0b987c0e99f546e7867f0c6af4c8336d7d1e2eca\n"
+    },
+    "status": {
+      "returncode": 0,
+      "output": ""
+    }
+  },
+  "candidate": {
+    "root": "/tmp/DeepSpeed_transpose_work",
+    "head": {
+      "returncode": 0,
+      "output": "e90e6aef4a17a08446dd362aeed54042387bd531\n"
+    },
+    "status": {
+      "returncode": 0,
+      "output": " M csrc/transformer/transform_kernels.cu\n?? benchmarks/transpose/\n"
+    }
+  },
+  "torch": "2.9.0",
+  "torch_cuda": null,
+  "cuda_available": false,
+  "reason": "CUDA GPU/toolchain unavailable; no kernels built or measured",
+  "gpu_after": {
+    "returncode": null,
+    "output": "[Errno 2] No such file or directory: 'nvidia-smi'"
+  }
+}
