@@ -70,9 +70,10 @@ branches. The option is disabled by default.
 
 Shared prefill currently requires HybridEngine kernel injection, ZeRO stage 0,
 inference tensor-parallel size 1, an internal KV cache, and a prompt longer than
-one token. It cannot be combined with CUDA graph capture or
-``release_inference_cache``. Sampling still happens independently for every
-response branch after the shared prompt forward.
+one token. It cannot be combined with CUDA graph capture,
+``release_inference_cache``, or continuous batching
+(``SamplingConfig.continuous_batch_size``). Sampling still happens independently
+for every response branch after the shared prompt forward.
 
 Continuous batching (experimental)
 -----------------------------------
