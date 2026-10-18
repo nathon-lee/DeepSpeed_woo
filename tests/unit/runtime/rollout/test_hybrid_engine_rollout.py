@@ -145,6 +145,50 @@ def test_continuous_graph_rejects_flash_attention():
         rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
 
 
+@pytest.mark.parametrize("options", [
+    {
+        "continuous_graph_pool_size": 0
+    },
+    {
+        "continuous_graph_pool_size": True
+    },
+    {
+        "continuous_prompt_buckets": ()
+    },
+    {
+        "continuous_prompt_buckets": (4, 4)
+    },
+    {
+        "continuous_prompt_buckets": (8, 4)
+    },
+    {
+        "continuous_prompt_buckets": (0, 4)
+    },
+    {
+        "continuous_prompt_buckets": (4, 5.5)
+    },
+])
+def test_continuous_graph_rejects_invalid_pool_configuration(options):
+    with pytest.raises(ValueError, match="continuous_"):
+        HybridEngineRollout(_make_engine(), _make_tokenizer(), HybridEngineRolloutConfig(**options))
+
+
+@pytest.mark.parametrize(("buckets", "capacity", "message"), [
+    ((2, ), None, "largest"),
+    ((4, 8), 5, "must fit"),
+])
+def test_continuous_graph_validates_bucket_capacity(buckets, capacity, message):
+    rollout = HybridEngineRollout(
+        _make_engine(),
+        _make_tokenizer(),
+        HybridEngineRolloutConfig(use_graph_capture=True,
+                                  continuous_prompt_buckets=buckets,
+                                  continuous_cache_capacity=capacity),
+    )
+    with pytest.raises(ValueError, match=message):
+        rollout.generate(_make_request(), SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
+
+
 def test_continuous_generation_routes_graph_capture_to_fixed_capacity_path():
     rollout = HybridEngineRollout(
         _make_engine(),
@@ -270,12 +314,19 @@ def test_continuous_graph_keeps_cache_position_alive_for_replay():
 
     # A captured kernel retains only the device pointer, not the Python tensor.
     assert module.cache_position_ref() is not None
+    # Eviction must not invalidate a state still held by its caller.
+    rollout._get_continuous_graph_state(module, 1, 5, 7, torch.device(accelerator.current_device_name()),
+                                        torch.float32, DeepSpeedStaticCache)
+    gc.collect()
     state.static_input.fill_(7)
     accelerator.replay_graph(state.graph)
     assert torch.equal(state.static_logits, torch.full_like(state.static_logits, 11))
 
 
-def test_continuous_graph_state_reuses_matching_capture_and_rebuilds_for_weight_updates():
+@pytest.mark.parametrize("pool_size", [1, 2])
+@pytest.mark.parametrize("change",
+                         ["weights", "storage", "dtype", "device", "batch", "cache", "attention", "mode", "model"])
+def test_continuous_graph_pool_reuse_eviction_and_invalidation(pool_size, change):
 
     class GraphCache:
 
@@ -296,20 +347,56 @@ def test_continuous_graph_state_reuses_matching_capture_and_rebuilds_for_weight_
             self.config = SimpleNamespace()
 
     module = DecodeModule()
-    rollout = HybridEngineRollout(SimpleNamespace(module=module), _make_tokenizer())
+    rollout = HybridEngineRollout(SimpleNamespace(module=module), _make_tokenizer(),
+                                  HybridEngineRolloutConfig(continuous_graph_pool_size=pool_size))
     graph = MagicMock()
     logits = torch.empty((1, 1, 8))
 
     with patch.object(rollout, "_capture_continuous_graph", return_value=(graph, logits)) as capture:
-        first = rollout._get_continuous_graph_state(module, 1, 3, 5, torch.device("cpu"), torch.float32, GraphCache)
-        second = rollout._get_continuous_graph_state(module, 1, 3, 5, torch.device("cpu"), torch.float32, GraphCache)
-        with torch.no_grad():
-            module.weight.add_(1)
-        third = rollout._get_continuous_graph_state(module, 1, 3, 5, torch.device("cpu"), torch.float32, GraphCache)
 
-    assert first is second
-    assert third is not first
-    assert capture.call_count == 2
+        def get_state(width, batch=1, capacity=8, dtype=torch.float32, device=torch.device("cpu")):
+            return rollout._get_continuous_graph_state(module, batch, width, capacity, device, dtype, GraphCache)
+
+        # Pin the A -> B -> A recapture regression and LRU reference lifetime.
+        first = get_state(3)
+        first_ref = weakref.ref(first)
+        assert get_state(3) is first
+        second = get_state(5)
+        third = get_state(3)
+        assert (third is first) == (pool_size == 2)
+        assert capture.call_count == (2 if pool_size == 2 else 3)
+        del first, second, third
+        get_state(7)
+        get_state(1)
+        gc.collect()
+        assert first_ref() is None
+
+        before = capture.call_count
+        if change == "weights":
+            with torch.no_grad():
+                module.weight.add_(1)
+        elif change == "storage":
+            module.weight.data = module.weight.data.clone()
+        elif change == "dtype":
+            get_state(7, dtype=torch.float64)
+        elif change == "device":
+            get_state(7, device=torch.device("meta"))
+        elif change == "batch":
+            get_state(7, batch=2)
+        elif change == "cache":
+            get_state(7, capacity=9)
+        elif change == "attention":
+            module.config._attn_implementation = "sdpa"
+        elif change == "mode":
+            module.eval()
+        elif change == "model":
+            module = DecodeModule()
+        get_state(7)
+        assert capture.call_count > before
+        before = capture.call_count
+        get_state(3)
+        get_state(7)
+        assert capture.call_count == before + (1 if pool_size == 2 else 2)
 
 
 def test_static_cache_constructor_supports_max_batch_keyword():

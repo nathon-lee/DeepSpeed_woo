@@ -148,6 +148,44 @@ and cache trimming are rejected while graph capture is enabled because they
 move cache rows or columns. ``flash_attention_2`` is also rejected because the
 captured decode uses a four-dimensional additive attention mask.
 
+Prompt buckets and graph pooling are opt-in. For example::
+
+    HybridEngineRolloutConfig(
+        use_graph_capture=True,
+        continuous_prompt_buckets=(32, 64, 128),
+        continuous_graph_pool_size=2,
+    )
+
+Each positive, strictly increasing boundary is an inclusive padded prompt
+width. The smallest boundary covering the input width is selected; widths
+above the largest boundary are rejected. Prompts and their attention masks
+are left-padded internally to that boundary, preserving effective position IDs.
+Returned prompt tokens, masks, response offsets, and repetition-penalty history
+use the original inputs, not the internal padding. Validate model-specific
+left-padding behavior against native generation before enabling buckets.
+Cache capacity must cover the bucket width plus all requested generated tokens
+and remain within the model context limit, even when the original prompt is
+shorter. ``continuous_cache_capacity`` can pin capacity but does not remove
+the bucket width from the graph signature.
+
+The default ``continuous_prompt_buckets=None`` preserves exact prompt widths;
+the default ``continuous_graph_pool_size=1`` retains only one state. A larger
+pool retains at most that many states, evicting the least recently used state
+before allocating a new one. Every state owns its graph, KV cache, logits, and
+static inputs. Separate batch capacities and cache capacities occupy separate
+entries. Changes in model identity, parameter storage/version, device, dtype,
+training mode, or attention implementation invalidate the entire pool.
+This is not a byte-level memory limit: each retained graph has its own CUDA
+allocator pool, and reserved memory may remain cached after eviction.
+Unversioned weight mutations are not supported.
+
+Graph statistics additionally expose per-call ``graph_captures``, the retained
+``graph_pool_size``, and the selected ``prompt_bucket``. For a reproducible
+alternating-bucket benchmark including native-generation checks, capture counts,
+synchronized latency, throughput, and allocated/reserved GPU memory, see
+``benchmarks/rollout/bench_cuda_graph_bucket_pool.py``. Pooling affects only the
+continuous CUDA Graph path; eager and default generation are unchanged.
+
 ``DeepSpeedStaticCache`` accepts one write position per row and can compact
 active rows while preserving its static tensor addresses. This mirrors the
 scheduler/cache separation used by systems such as vLLM and SGLang without

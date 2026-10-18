@@ -15,6 +15,7 @@ Two generation paths:
 """
 
 import time
+from collections import OrderedDict
 from copy import copy
 from dataclasses import dataclass
 from inspect import signature
@@ -95,11 +96,12 @@ class HybridEngineRolloutConfig:
     align_decode_fronts: bool = False
     enable_cache_trimming: bool = False
     continuous_cache_capacity: Optional[int] = None
+    continuous_graph_pool_size: int = 1
+    continuous_prompt_buckets: Optional[tuple[int, ...]] = None
 
 
 @dataclass
 class _ContinuousGraphState:
-    signature: tuple
     cache: object
     static_input: torch.Tensor
     static_attention: torch.Tensor
@@ -129,8 +131,20 @@ class HybridEngineRollout(RolloutEngine):
         self.align_decode_fronts = getattr(cfg, 'align_decode_fronts', False) if cfg else False
         self.enable_cache_trimming = getattr(cfg, 'enable_cache_trimming', False) if cfg else False
         self.continuous_cache_capacity = getattr(cfg, 'continuous_cache_capacity', None) if cfg else None
+        self.continuous_graph_pool_size = getattr(cfg, 'continuous_graph_pool_size', 1) if cfg else 1
+        buckets = getattr(cfg, 'continuous_prompt_buckets', None) if cfg else None
+        if type(self.continuous_graph_pool_size) is not int or self.continuous_graph_pool_size <= 0:
+            raise ValueError("continuous_graph_pool_size must be a positive integer")
+        if buckets is not None:
+            buckets = tuple(buckets)
+            if (not buckets or any(type(bound) is not int or bound <= 0 for bound in buckets)
+                    or any(left >= right for left, right in zip(buckets, buckets[1:]))):
+                raise ValueError("continuous_prompt_buckets must contain strictly increasing positive integers")
+        self.continuous_prompt_buckets = buckets
         self._last_profile = None
-        self._continuous_graph_state = None
+        self._continuous_graph_states = OrderedDict()
+        self._continuous_graph_context = None
+        self._continuous_graph_capture_count = 0
         self._last_continuous_stats = None
 
     @torch.no_grad()
@@ -554,6 +568,11 @@ class HybridEngineRollout(RolloutEngine):
         """
         module = self.engine.module
         prompt_len = requests[0].prompt_ids.shape[1]
+        if self.continuous_prompt_buckets is not None:
+            bucket = next((bound for bound in self.continuous_prompt_buckets if bound >= prompt_len), None)
+            if bucket is None:
+                raise ValueError("padded prompt width exceeds the largest continuous_prompt_buckets boundary")
+            prompt_len = bucket
         self._validate_continuous_graph_options(prompt_len, sampling)
         if getattr(module, "_supports_cache_class", None) is False:
             raise ValueError("continuous batching requires a model with cache-class support; use the default "
@@ -582,12 +601,27 @@ class HybridEngineRollout(RolloutEngine):
         scheduler = ContinuousBatchScheduler(max_batch_size, sampling.max_new_tokens)
         prompt_lengths = {request_id: prompt_len for request_id in range(len(requests))}
         request_by_id = {}
+        prefill_request_by_id = {}
         responses = {}
         for request_id, request in enumerate(requests):
             scheduler.submit(ContinuousBatchRequest(request_id))
             request_by_id[request_id] = request
+            padding = prompt_len - request.prompt_ids.shape[1]
+            if padding:
+                pad_token_id = self.tokenizer.pad_token_id
+                if pad_token_id is None:
+                    pad_token_id = self.tokenizer.eos_token_id
+                if pad_token_id is None:
+                    raise ValueError("The tokenizer must define pad_token_id or eos_token_id")
+                prefill_request_by_id[request_id] = RolloutRequest(
+                    torch.nn.functional.pad(request.prompt_ids, (padding, 0), value=pad_token_id),
+                    torch.nn.functional.pad(request.prompt_attention_mask, (padding, 0), value=0),
+                )
+            else:
+                prefill_request_by_id[request_id] = request
             responses[request_id] = []
 
+        captures_before = self._continuous_graph_capture_count
         state = self._get_continuous_graph_state(module, max_batch_size, prompt_len, max_cache_len, device,
                                                  model_dtype, DeepSpeedStaticCache)
         cache = state.cache
@@ -599,6 +633,12 @@ class HybridEngineRollout(RolloutEngine):
         graph = state.graph
         static_logits = state.static_logits
         stats = {
+            "graph_captures":
+            self._continuous_graph_capture_count - captures_before,
+            "graph_pool_size":
+            len(self._continuous_graph_states),
+            "prompt_bucket":
+            prompt_len,
             "cache_capacity":
             max_cache_len,
             "peak_cache_length":
@@ -652,7 +692,7 @@ class HybridEngineRollout(RolloutEngine):
                     StaticCache,
                     cache,
                     update,
-                    request_by_id,
+                    prefill_request_by_id,
                     static_attention,
                     static_write_positions,
                     prompt_len,
@@ -746,8 +786,17 @@ class HybridEngineRollout(RolloutEngine):
                                     cache_type):
         signature = self._continuous_graph_signature(module, max_batch_size, prompt_len, max_cache_len, device,
                                                      model_dtype)
-        state = self._continuous_graph_state
-        if state is None or state.signature != signature:
+        # Shape changes may coexist, but a weight/storage or execution-context
+        # change invalidates the entire pool, including buckets not used next.
+        context = signature[:-3]
+        if self._continuous_graph_context != context:
+            self._continuous_graph_states.clear()
+            self._continuous_graph_context = context
+        state = self._continuous_graph_states.pop(signature, None)
+        if state is None:
+            # Evict before allocating to bound the retained states even at capture.
+            while len(self._continuous_graph_states) >= self.continuous_graph_pool_size:
+                self._continuous_graph_states.popitem(last=False)
             cache = cache_type(
                 module.config,
                 batch_size=max_batch_size,
@@ -777,7 +826,6 @@ class HybridEngineRollout(RolloutEngine):
                 static_position_ids,
             )
             state = _ContinuousGraphState(
-                signature,
                 cache,
                 static_input,
                 static_attention,
@@ -788,7 +836,8 @@ class HybridEngineRollout(RolloutEngine):
                 graph,
                 static_logits,
             )
-            self._continuous_graph_state = state
+            self._continuous_graph_capture_count += 1
+        self._continuous_graph_states[signature] = state
 
         state.cache.reset()
         state.static_input.zero_()
@@ -801,8 +850,8 @@ class HybridEngineRollout(RolloutEngine):
     @staticmethod
     def _continuous_graph_signature(module, max_batch_size, prompt_len, max_cache_len, device, model_dtype):
         parameter_signature = tuple((parameter.data_ptr(), parameter._version) for parameter in module.parameters())
-        return (id(module), device.type, device.index, model_dtype, max_batch_size, prompt_len, max_cache_len,
-                parameter_signature)
+        return (id(module), device.type, device.index, model_dtype, parameter_signature, module.training,
+                getattr(module.config, "_attn_implementation", None), max_batch_size, prompt_len, max_cache_len)
 
     @staticmethod
     def _update_static_causal_attention(static_attention, static_causal_attention):
