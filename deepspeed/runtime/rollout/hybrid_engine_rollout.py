@@ -508,12 +508,10 @@ class HybridEngineRollout(RolloutEngine):
                     logical_positions[request_id] += 1
 
             next_tokens = decoded_tokens | admitted_tokens
-            finished_ids = []
             for request_id in update.active_ids:
                 token = next_tokens[request_id]
                 responses[request_id].append(token)
-                if self._is_eos(token):
-                    finished_ids.append(request_id)
+            finished_ids = self._continuous_finished_ids(update.active_ids, next_tokens)
 
             if survivor_count:
                 cache_position += 1
@@ -701,12 +699,10 @@ class HybridEngineRollout(RolloutEngine):
                 stats["decode_steps"] += 1
                 next_tokens.update(decoded_tokens)
 
-            finished_ids = []
             for request_id in update.active_ids:
                 token = next_tokens[request_id]
                 responses[request_id].append(token)
-                if self._is_eos(token):
-                    finished_ids.append(request_id)
+            finished_ids = self._continuous_finished_ids(update.active_ids, next_tokens)
 
             scheduler_start = self._profile_start(profile)
             update = scheduler.advance(finished_ids)
@@ -1130,12 +1126,17 @@ class HybridEngineRollout(RolloutEngine):
         position_ids = attention_mask.long().cumsum(dim=-1) - 1
         return position_ids.masked_fill(attention_mask == 0, 1)
 
-    def _is_eos(self, token):
+    def _continuous_finished_ids(self, active_ids, next_tokens):
         eos_token_id = self.tokenizer.eos_token_id
         if eos_token_id is None:
-            return False
-        eos_ids = torch.as_tensor(eos_token_id, dtype=token.dtype, device=token.device).flatten()
-        return bool((token == eos_ids).any().item())
+            return []
+        tokens = torch.cat([next_tokens[request_id] for request_id in active_ids], dim=0)
+        eos_ids = torch.as_tensor(eos_token_id, dtype=tokens.dtype, device=tokens.device).flatten()
+        if eos_ids.numel() == 0:
+            return []
+        # Transfer flags together, in scheduler order rather than physical cache-slot order.
+        finished = (tokens == eos_ids).any(dim=1).cpu().tolist()
+        return [request_id for request_id, is_finished in zip(active_ids, finished) if is_finished]
 
     @staticmethod
     def _call_model(module, input_ids, **kwargs):

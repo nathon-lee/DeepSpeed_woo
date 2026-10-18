@@ -442,7 +442,8 @@ def test_continuous_graph_generation_rejects_legacy_cache_model():
         rollout.generate(request, SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=1))
 
 
-def test_continuous_generation_covers_modern_static_cache_path():
+@pytest.mark.parametrize("eos_token_id", [2, [2, 7], None, []])
+def test_continuous_generation_covers_modern_static_cache_path(eos_token_id):
 
     class CacheClassModel(torch.nn.Module):
         _supports_cache_class = True
@@ -482,17 +483,26 @@ def test_continuous_generation_covers_modern_static_cache_path():
             return SimpleNamespace(logits=logits, past_key_values=past_key_values)
 
     model = CacheClassModel()
-    rollout = HybridEngineRollout(SimpleNamespace(module=model), SimpleNamespace(pad_token_id=0, eos_token_id=2))
+    rollout = HybridEngineRollout(SimpleNamespace(module=model),
+                                  SimpleNamespace(pad_token_id=0, eos_token_id=eos_token_id))
     request = RolloutRequest(
         torch.tensor([[1, 2, 3], [1, 2, 4], [1, 2, 5]]),
         torch.ones((3, 3), dtype=torch.long),
     )
     output = rollout.generate(request, SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=2))
 
-    assert output.input_ids.shape == (3, 6)
+    if eos_token_id == [2, 7]:
+        expected_responses = [[2], [7], [7]]
+        expected_mask = [[1], [1], [1]]
+    elif eos_token_id is None or eos_token_id == []:
+        expected_responses = [[2, 7, 7], [7, 7, 7], [7, 7, 7]]
+        expected_mask = [[1, 1, 1]] * 3
+    else:
+        expected_responses = [[2, 0, 0], [7, 7, 7], [7, 7, 7]]
+        expected_mask = [[1, 0, 0], [1, 1, 1], [1, 1, 1]]
     assert output.input_ids[:, :3].tolist() == request.prompt_ids.tolist()
-    assert output.input_ids[:, 3:].tolist() == [[2, 0, 0], [7, 7, 7], [7, 7, 7]]
-    assert output.attention_mask[:, 3:].tolist() == [[1, 0, 0], [1, 1, 1], [1, 1, 1]]
+    assert output.input_ids[:, 3:].tolist() == expected_responses
+    assert output.attention_mask[:, 3:].tolist() == expected_mask
     assert output.response_start_idx.tolist() == [3, 3, 3]
     assert model.calls[0] == (2, 3)
     assert (1, 3) in model.calls

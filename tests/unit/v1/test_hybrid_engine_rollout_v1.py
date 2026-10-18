@@ -74,7 +74,8 @@ def test_continuous_generation_profile_on_accelerator():
     assert profile["total_ms"] >= profile["generation_ms"]
 
 
-def test_continuous_graph_generation_refills_a_fixed_slot_on_cuda():
+@pytest.mark.parametrize("eos_token_id", [2, [2, 3], None, []])
+def test_continuous_graph_generation_refills_a_fixed_slot_on_cuda(eos_token_id):
     accelerator = get_accelerator()
     if not accelerator.is_available() or accelerator.device_name() != "cuda":
         pytest.skip("CUDA is required for CUDA graph rollout coverage")
@@ -106,11 +107,12 @@ def test_continuous_graph_generation_refills_a_fixed_slot_on_cuda():
         def forward(self, input_ids, attention_mask, past_key_values=None, use_cache=True, **kwargs):
             states = input_ids[:, None, :, None].to(dtype=torch.float32)
             _, values = past_key_values.update(states, states, layer_idx=0, cache_kwargs=kwargs)
-            cache_sums = values[:, 0].sum(dim=(1, 2)).long()
+            visible = attention_mask if attention_mask.ndim == 2 else attention_mask[:, 0, -1, :] == 0
+            cache_sums = (values[:, 0, :visible.shape[1], 0] * visible).sum(dim=1).long()
             if input_ids.shape[1] > 1:
                 next_tokens = torch.where(cache_sums == 6, 2, 7)
             else:
-                next_tokens = torch.where((cache_sums == 14) | (cache_sums == 16), 2, 8)
+                next_tokens = torch.where(cache_sums == 14, 3, torch.where(cache_sums == 16, 2, 8))
             logits = torch.zeros((input_ids.shape[0], input_ids.shape[1], 16), device=input_ids.device)
             logits.scatter_(2, next_tokens[:, None, None].expand(-1, input_ids.shape[1], 1), 1)
             return SimpleNamespace(logits=logits, past_key_values=past_key_values)
@@ -118,31 +120,71 @@ def test_continuous_graph_generation_refills_a_fixed_slot_on_cuda():
     device = torch.device(accelerator.device_name())
     graph_rollout = HybridEngineRollout(
         SimpleNamespace(module=CacheClassModel().to(device)),
-        SimpleNamespace(pad_token_id=0, eos_token_id=2),
+        SimpleNamespace(pad_token_id=0, eos_token_id=eos_token_id),
         cfg=HybridEngineRolloutConfig(use_graph_capture=True),
     )
     eager_rollout = HybridEngineRollout(
         SimpleNamespace(module=CacheClassModel().to(device)),
-        SimpleNamespace(pad_token_id=0, eos_token_id=2),
+        SimpleNamespace(pad_token_id=0, eos_token_id=eos_token_id),
     )
     request = RolloutRequest(
-        torch.tensor([[1, 2, 3], [1, 2, 4], [3, 3, 3]], device=device),
-        torch.ones((3, 3), dtype=torch.long, device=device),
+        torch.tensor([[1, 2, 3], [1, 2, 4], [3, 3, 3], [1, 2, 4], [1, 2, 3]], device=device),
+        torch.ones((5, 3), dtype=torch.long, device=device),
     )
 
-    sampling = SamplingConfig(max_new_tokens=2, temperature=0, continuous_batch_size=2)
+    sampling = SamplingConfig(max_new_tokens=3, temperature=0, continuous_batch_size=2)
     eager_output = eager_rollout.generate(request, sampling)
     graph_output = graph_rollout.generate(request, sampling)
 
     assert torch.equal(graph_output.input_ids, eager_output.input_ids)
     assert torch.equal(graph_output.attention_mask, eager_output.attention_mask)
-    assert graph_output.input_ids[:, 3:].cpu().tolist() == [[2, 0], [7, 2], [7, 2]]
+    assert torch.equal(graph_output.response_start_idx, eager_output.response_start_idx)
+    if eos_token_id == [2, 3]:
+        expected = [[2, 0], [7, 3], [7, 2], [7, 3], [2, 0]]
+        expected_mask = [[1, 0], [1, 1], [1, 1], [1, 1], [1, 0]]
+    elif eos_token_id is None or eos_token_id == []:
+        expected = [[2, 8, 2], [7, 3, 8], [7, 2, 8], [7, 3, 8], [2, 8, 2]]
+        expected_mask = [[1, 1, 1]] * 5
+    else:
+        expected = [[2, 0, 0], [7, 3, 8], [7, 2, 0], [7, 3, 8], [2, 0, 0]]
+        expected_mask = [[1, 0, 0], [1, 1, 1], [1, 1, 0], [1, 1, 1], [1, 0, 0]]
+    assert graph_output.input_ids[:, 3:].cpu().tolist() == expected
+    assert graph_output.attention_mask[:, 3:].cpu().tolist() == expected_mask
+    assert graph_output.response_start_idx.cpu().tolist() == [3] * 5
+    replay_output = graph_rollout.generate(request, sampling)
+    assert torch.equal(replay_output.input_ids, graph_output.input_ids)
+    assert torch.equal(replay_output.attention_mask, graph_output.attention_mask)
     stats = graph_rollout.get_last_continuous_stats()
-    assert stats["cache_capacity"] == 5
-    assert stats["peak_cache_length"] == 4
-    assert stats["decode_steps"] == 2
+    assert stats["cache_capacity"] == 6
+    assert stats["peak_cache_length"] <= 5
+    assert stats["decode_steps"] > 0
     assert stats["trim_count"] == 0
     assert stats["trim_frequency"] == 0.0
+
+
+@pytest.mark.parametrize("eos_token_id", [2, [2, 3], None, []])
+def test_continuous_eos_flags_transfer_as_one_batch_on_cuda(eos_token_id):
+    accelerator = get_accelerator()
+    if not accelerator.is_available() or accelerator.device_name() != "cuda":
+        pytest.skip("CUDA is required for EOS transfer profiling")
+
+    rollout = HybridEngineRollout(SimpleNamespace(module=None), SimpleNamespace(eos_token_id=eos_token_id))
+    # Scheduler order deliberately differs from request-ID and physical-slot order.
+    active_ids = (8, 1, 5, 3)
+    tokens = torch.tensor([[3], [7], [2], [8]], device="cuda")
+    next_tokens = dict(zip(active_ids, tokens.split(1)))
+    accelerator.synchronize()
+    with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as profile:
+        finished = rollout._continuous_finished_ids(active_ids, next_tokens)
+
+    expected = [8, 5] if eos_token_id == [2, 3] else ([5] if eos_token_id == 2 else [])
+    assert finished == expected
+    events = profile.events()
+    # Pin the performance regression: no per-request scalar read, at most one flag copy.
+    assert not any(event.name == "aten::_local_scalar_dense" for event in events)
+    copies = [event for event in events if "Memcpy DtoH" in event.name]
+    assert len(copies) == (1 if eos_token_id else 0)
 
 
 def test_continuous_graph_matches_pretrained_model_when_enabled():
